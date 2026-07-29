@@ -1,0 +1,52 @@
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build and packaging output
+build/
+dist/
+*.spec
+*.zip
+
+# Editors and Windows metadata
+.idea/
+.vscode/
+*.code-workspace
+Thumbs.db
+Desktop.ini
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+config.local.json
+key.txt
+key-*.txt
+*.key
+
+# WeChat databases, exports, logs, and extracted media
+exports/
+output/
+logs/
+*.log
+*.db
+*.db-wal
+*.db-shm
+*.silk
+*.pcm
+*.wav
+
+# Downloaded speech models and Hugging Face caches
+models/
+.cache/
+huggingface/

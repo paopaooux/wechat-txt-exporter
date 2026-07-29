@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wechat-txt-exporter"
+version = "0.1.0"
+description = "Export local Weixin 4.1.11.55 conversations to UTF-8 text files"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+  "sqlcipher3-wheels>=0.5.3",
+]
+
+[project.scripts]
+wechat-txt-exporter = "wechat_txt_exporter.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
