@@ -123,7 +123,7 @@ class ExporterWindow:
         ttk.Label(outer, text="微信聊天记录导出", font=("Microsoft YaHei UI", 18, "bold")).pack(anchor="w")
         ttk.Label(
             outer,
-            text="微信 4.1.11.55 · 每个好友或群聊生成一个 UTF-8 TXT",
+            text="微信 4.1.x · 每个好友或群聊生成一个 UTF-8 TXT",
             foreground="#555555",
         ).pack(anchor="w", pady=(3, 16))
 

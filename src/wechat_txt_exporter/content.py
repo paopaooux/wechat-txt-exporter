@@ -7,7 +7,8 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 ABSOLUTE_PATH_RE = re.compile(r"[A-Za-z]:[\\/][^\x00\r\n<>|\"]+")
-WXID_RE = re.compile(r"(?:wxid_[A-Za-z0-9_-]+|[A-Za-z0-9_-]+@chatroom)")
+USER_ID_PATTERN = r"(?:wxid_[A-Za-z0-9_-]+|[A-Za-z0-9_-]+@(?:chatroom|openim))"
+WXID_RE = re.compile(USER_ID_PATTERN)
 MD5_RE = re.compile(r"(?i)(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])")
 
 
@@ -62,7 +63,7 @@ def extract_xml_text(content: str, *paths: str) -> str:
 
 
 def sender_hint(content: str, origin_source: str = "", packed_info: str = "") -> str | None:
-    prefix = re.match(r"^((?:wxid_[^:\r\n]+|[^:\r\n]+@chatroom)):\s*\n", content)
+    prefix = re.match(rf"^({USER_ID_PATTERN}):\s*\n", content)
     if prefix:
         return prefix.group(1)
     for source in (origin_source, packed_info):
@@ -73,7 +74,7 @@ def sender_hint(content: str, origin_source: str = "", packed_info: str = "") ->
 
 
 def strip_group_sender_prefix(content: str) -> str:
-    return re.sub(r"^(?:wxid_[^:\r\n]+|[^:\r\n]+@chatroom):\s*\n", "", content, count=1)
+    return re.sub(rf"^{USER_ID_PATTERN}:\s*\n", "", content, count=1)
 
 
 def media_tokens(content: str) -> tuple[list[Path], set[str], set[str]]:

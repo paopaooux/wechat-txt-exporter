@@ -21,6 +21,12 @@ def test_sender_hint_and_group_prefix():
     assert human_content(1, value) == "大家好"
 
 
+def test_sender_hint_supports_openim_usernames():
+    value = "25984984023319900@openim:\n大家好"
+    assert sender_hint(value) == "25984984023319900@openim"
+    assert human_content(1, value) == "大家好"
+
+
 def test_app_file_message():
     content = "<msg><appmsg><title>报告.pdf</title><type>6</type></appmsg></msg>"
     assert app_message_type(content) == 6

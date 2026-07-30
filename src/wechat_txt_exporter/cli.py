@@ -26,7 +26,7 @@ def _project_root() -> Path:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="wechat-txt-exporter",
-        description="将 Windows 微信 4.1.11.55 的好友和群聊记录分别导出为 TXT。",
+        description="将 Windows 微信 4.1.x 的好友和群聊记录分别导出为 TXT。",
     )
     parser.add_argument("--account", help="指定 wxid，跳过交互式账号选择")
     parser.add_argument(

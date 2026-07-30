@@ -64,7 +64,7 @@ def _row_dict(row: Any, description: Any = None) -> dict[str, Any]:
 
 
 class Weixin411Adapter:
-    """Schema adapter for Weixin 4.1.11.55 databases."""
+    """Schema adapter for compatible Weixin 4.1.x databases."""
 
     def __init__(
         self,
@@ -139,7 +139,7 @@ class Weixin411Adapter:
                 candidate = (table, columns)
                 break
         if candidate is None:
-            raise SchemaError("contact.db 中未找到 4.1.11.55 联系人表。")
+            raise SchemaError("contact.db 中未找到兼容的微信 4.1.x 联系人表。")
 
         table, columns = candidate
         cursor = connection.execute(f"SELECT rowid AS __rowid__, * FROM {quote_identifier(table)}")
@@ -542,16 +542,35 @@ class Weixin411Adapter:
                     content = _as_text(_first(data, ("compress_content",), ""))
                 origin = _as_text(_first(data, ("origin_source",), ""))
                 packed = _as_text(_first(data, ("packed_info_data", "packed_info"), ""))
-                raw_sender = _first(data, ("real_sender_id", "sender_id", "is_sender"))
+                # real_sender_id/sender_id are identities. is_sender is a
+                # direction flag in some 4.1 builds and must not be treated as
+                # a Name2Id row id.
+                raw_sender = _first(data, ("real_sender_id", "sender_id"))
+                sender_identity_missing = raw_sender in (None, "", "0", 0)
                 numeric_sender = _as_int(raw_sender, -1)
                 if numeric_sender > 0:
-                    raw_sender = self._sender_name_map(_path, connection).get(
-                        numeric_sender, raw_sender
+                    mapped_sender = self._sender_name_map(_path, connection).get(
+                        numeric_sender
                     )
+                    if mapped_sender:
+                        raw_sender = mapped_sender
+                        sender_identity_missing = False
+                    else:
+                        sender_identity_missing = True
                 is_send = _first(
                     data,
                     ("is_send", "is_sender", "computed_is_send", "isSend", "computedIsSend"),
                 )
+                if _as_int(is_send, -1) not in (0, 1):
+                    # Older 4.1 schemas may expose only status. It is less
+                    # authoritative than Name2Id, so use it solely as a
+                    # direction fallback when the sender identity is missing.
+                    status = _as_int(_first(data, ("status", "msg_status")), -1)
+                    if sender_identity_missing:
+                        if status == 2:
+                            is_send = 1
+                        elif status == 4:
+                            is_send = 0
                 hint = sender_hint(content, origin, packed)
                 sender_id, sender_name = self._resolve_sender(
                     conversation, raw_sender, hint, is_send
@@ -587,11 +606,13 @@ class Weixin411Adapter:
                 return hint, "我"
             contact = self._contact_by_username.get(hint)
             return hint, contact.display_name if contact else hint
-        numeric = _as_int(raw_sender, -1)
-        if numeric == 0 or raw_sender in (None, "", "0"):
-            return 0, "我"
         if send_flag == 0 and not conversation.is_group:
             return raw_sender, conversation.display_name
+        numeric = _as_int(raw_sender, -1)
+        if numeric == 0 or raw_sender in (None, "", "0"):
+            if send_flag == 0 and conversation.is_group:
+                return None, "群成员（发送者记录缺失）"
+            return 0, "我"
         raw_text = _as_text(raw_sender)
         if raw_text == self.account.wxid:
             return raw_text, "我"
@@ -599,4 +620,6 @@ class Weixin411Adapter:
             return raw_text, self._contact_by_username[raw_text].display_name
         if not conversation.is_group:
             return raw_sender, conversation.display_name
-        return raw_sender, f"成员#{raw_text or numeric}"
+        if raw_text and not raw_text.isdigit():
+            return raw_sender, raw_text
+        return raw_sender, f"群成员（发送者记录缺失，ID {raw_text or numeric}）"
