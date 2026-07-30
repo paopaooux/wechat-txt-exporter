@@ -96,6 +96,26 @@ def test_exports_private_and_group_but_not_official(tmp_path):
     assert "好友备注：群消息" in group.read_text(encoding="utf-8")
 
 
+def test_repeated_export_rewrites_the_same_txt_atomically(tmp_path):
+    account = _create_fixture(tmp_path)
+    output_root = tmp_path / "exports"
+
+    with Weixin411Adapter(account, b"x" * 32, connection_factory=_factory) as adapter:
+        first = export_all(adapter, output_root)
+
+    target = first.output_dir / "个人会话" / "好友备注.txt"
+    original = target.read_text(encoding="utf-8")
+    target.write_text("不应保留的旧内容", encoding="utf-8")
+
+    with Weixin411Adapter(account, b"x" * 32, connection_factory=_factory) as adapter:
+        second = export_all(adapter, output_root)
+
+    assert first.output_dir == output_root / account.wxid
+    assert second.output_dir == first.output_dir
+    assert target.read_text(encoding="utf-8") == original
+    assert not list(first.output_dir.rglob("*.tmp"))
+
+
 def test_export_can_be_cancelled_before_next_conversation(tmp_path):
     account = _create_fixture(tmp_path)
     cancel_event = threading.Event()

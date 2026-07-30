@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -79,9 +81,26 @@ def _write_conversation(
     category_dir = output_dir / ("群聊" if conversation.is_group else "个人会话")
     category_dir.mkdir(parents=True, exist_ok=True)
     target = category_dir / filename
-    with target.open("w", encoding="utf-8", newline="\n") as handle:
-        for message in messages:
-            handle.write(_format_message(message, resolver))
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            newline="\n",
+            dir=category_dir,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            for message in messages:
+                handle.write(_format_message(message, resolver))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, target)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
     return len(messages)
 
 
@@ -93,13 +112,8 @@ def export_all(
     voice_model: str = "small",
     cancel_event: threading.Event | None = None,
 ) -> ExportResult:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = output_root / f"{timestamp}_{adapter.account.wxid}"
-    suffix = 1
-    while output_dir.exists():
-        output_dir = output_root / f"{timestamp}_{adapter.account.wxid}_{suffix}"
-        suffix += 1
-    output_dir.mkdir(parents=True, exist_ok=False)
+    output_dir = output_root / adapter.account.wxid
+    output_dir.mkdir(parents=True, exist_ok=True)
     result = ExportResult(output_dir=output_dir)
     resolver = MediaResolver(adapter.account.data_dir)
     voice_transcriber = VoiceTranscriber(voice_model) if transcribe_voice else None

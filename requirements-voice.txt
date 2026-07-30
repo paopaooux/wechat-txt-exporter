@@ -1,2 +1,0 @@
-silk-python
-faster-whisper>=1.1.0

@@ -1,2 +1,4 @@
 -e .
--r requirements-voice.txt
+faster-whisper>=1.1.0
+pytest>=8.2
+silk-python
