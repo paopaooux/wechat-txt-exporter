@@ -1,11 +1,29 @@
 from __future__ import annotations
 
+import io
 import os
 import tempfile
 import wave
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+MODEL_REPOSITORIES = {
+    "tiny": "Systran/faster-whisper-tiny",
+    "base": "Systran/faster-whisper-base",
+    "small": "Systran/faster-whisper-small",
+    "medium": "Systran/faster-whisper-medium",
+    "large-v3": "Systran/faster-whisper-large-v3",
+}
+MODEL_ALLOW_PATTERNS = (
+    "config.json",
+    "preprocessor_config.json",
+    "model.bin",
+    "tokenizer.json",
+    "vocabulary.*",
+)
 
 
 @dataclass(slots=True)
@@ -15,13 +33,126 @@ class VoiceResult:
     error: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class ModelLoadProgress:
+    stage: str
+    model_name: str
+    completed: int = 0
+    total: int = 0
+    detail: str = ""
+
+
+ModelProgressCallback = Callable[[ModelLoadProgress], None]
+
+
+def _download_progress_class(
+    model_name: str, callback: ModelProgressCallback
+) -> type[Any]:
+    """Build a silent tqdm class that forwards aggregate model bytes."""
+    from tqdm.auto import tqdm
+
+    class DownloadProgress(tqdm):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            description = str(kwargs.get("desc", ""))
+            self._tracks_model_bytes = (
+                kwargs.get("unit") == "B"
+                and description.casefold().startswith("reconstruct")
+            )
+            kwargs["disable"] = False
+            kwargs["file"] = io.StringIO()
+            kwargs.setdefault("mininterval", 0.1)
+            super().__init__(*args, **kwargs)
+            self._report()
+
+        def _report(self) -> None:
+            if not self._tracks_model_bytes:
+                return
+            callback(
+                ModelLoadProgress(
+                    stage="downloading",
+                    model_name=model_name,
+                    completed=max(0, int(getattr(self, "n", 0) or 0)),
+                    total=max(0, int(getattr(self, "total", 0) or 0)),
+                )
+            )
+
+        def display(self, *args: Any, **kwargs: Any) -> None:
+            # The GUI renders progress. Do not emit terminal control sequences.
+            return None
+
+        def refresh(self, *args: Any, **kwargs: Any) -> bool:
+            self._report()
+            return True
+
+        def close(self) -> None:
+            self._report()
+            super().close()
+
+    return DownloadProgress
+
+
 class VoiceTranscriber:
     """Decode Weixin Silk audio and transcribe it with faster-whisper."""
 
-    def __init__(self, model_name: str = "small"):
+    def __init__(
+        self,
+        model_name: str = "small",
+        progress_callback: ModelProgressCallback | None = None,
+    ):
         self.model_name = model_name or "small"
+        self.progress_callback = progress_callback
         self._model: Any | None = None
         self._fatal_error = ""
+
+    def _notify_progress(
+        self,
+        stage: str,
+        *,
+        completed: int = 0,
+        total: int = 0,
+        detail: str = "",
+    ) -> None:
+        if self.progress_callback is None:
+            return
+        try:
+            self.progress_callback(
+                ModelLoadProgress(
+                    stage=stage,
+                    model_name=self.model_name,
+                    completed=completed,
+                    total=total,
+                    detail=detail,
+                )
+            )
+        except Exception:
+            # Progress reporting must never interrupt an export.
+            pass
+
+    def _download_model(self) -> str:
+        from huggingface_hub import snapshot_download
+
+        model_path = Path(self.model_name).expanduser()
+        if model_path.is_dir():
+            return str(model_path.resolve())
+
+        repository = MODEL_REPOSITORIES.get(self.model_name)
+        if repository is None and "/" in self.model_name:
+            repository = self.model_name
+        if repository is None:
+            # Let faster-whisper produce its normal validation error.
+            return self.model_name
+
+        progress_class = _download_progress_class(
+            self.model_name, self.progress_callback or (lambda _progress: None)
+        )
+        return str(
+            snapshot_download(
+                repository,
+                allow_patterns=list(MODEL_ALLOW_PATTERNS),
+                library_name="faster-whisper",
+                tqdm_class=progress_class,
+            )
+        )
 
     @staticmethod
     def _decode_silk(silk_path: Path, pcm_path: Path, sample_rate: int = 24000) -> None:
@@ -80,16 +211,28 @@ class VoiceTranscriber:
         try:
             from faster_whisper import WhisperModel  # type: ignore[import-not-found]
         except ImportError as exc:
-            raise RuntimeError(
+            error = RuntimeError(
                 "未安装 faster-whisper，无法进行语音转文字。"
-            ) from exc
+            )
+            self._notify_progress("error", detail=str(error))
+            raise error from exc
         device = os.environ.get("WECHAT_VOICE_DEVICE", "cpu")
         compute_type = os.environ.get(
             "WECHAT_VOICE_COMPUTE_TYPE", "int8" if device == "cpu" else "float16"
         )
-        self._model = WhisperModel(
-            self.model_name, device=device, compute_type=compute_type
-        )
+        try:
+            model_source = self.model_name
+            if self.progress_callback is not None:
+                self._notify_progress("checking")
+                model_source = self._download_model()
+                self._notify_progress("loading")
+            self._model = WhisperModel(
+                model_source, device=device, compute_type=compute_type
+            )
+        except Exception as exc:
+            self._notify_progress("error", detail=str(exc))
+            raise
+        self._notify_progress("ready")
         return self._model
 
     def process(self, silk_data: bytes, wav_path: Path) -> VoiceResult:

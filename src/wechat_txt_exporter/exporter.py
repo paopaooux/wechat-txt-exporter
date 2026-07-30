@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import threading
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from .adapter import Weixin411Adapter
 from .content import app_message_type, human_content
 from .media import MediaResolver
 from .models import Conversation, ExportResult, Message
-from .voice import VoiceTranscriber
+from .voice import ModelLoadProgress, VoiceTranscriber
 
 INVALID_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 WINDOWS_RESERVED = {
@@ -91,6 +92,7 @@ def export_all(
     *,
     transcribe_voice: bool = False,
     voice_model: str = "small",
+    voice_progress: Callable[[ModelLoadProgress], None] | None = None,
     cancel_event: threading.Event | None = None,
 ) -> ExportResult:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -102,7 +104,11 @@ def export_all(
     output_dir.mkdir(parents=True, exist_ok=False)
     result = ExportResult(output_dir=output_dir)
     resolver = MediaResolver(adapter.account.data_dir)
-    voice_transcriber = VoiceTranscriber(voice_model) if transcribe_voice else None
+    voice_transcriber = (
+        VoiceTranscriber(voice_model, progress_callback=voice_progress)
+        if transcribe_voice
+        else None
+    )
     voice_announced = False
     conversations = adapter.load_conversations()
     total = len(conversations)

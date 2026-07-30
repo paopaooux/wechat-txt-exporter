@@ -19,6 +19,7 @@ from .errors import ExporterError
 from .exporter import export_all
 from .key_recovery import recover_database_key
 from .models import Account
+from .voice import ModelLoadProgress
 
 
 def _enable_high_dpi() -> None:
@@ -58,6 +59,15 @@ class _QueueWriter:
         if self.pending.strip():
             self.events.put(("log", self.pending))
         self.pending = ""
+
+
+def _format_bytes(value: int) -> str:
+    amount = max(0.0, float(value))
+    for unit in ("B", "KB", "MB", "GB"):
+        if amount < 1024.0 or unit == "GB":
+            return f"{amount:.1f} {unit}" if unit != "B" else f"{int(amount)} B"
+        amount /= 1024.0
+    return f"{amount:.1f} GB"
 
 
 class ExporterWindow:
@@ -109,6 +119,7 @@ class ExporterWindow:
             value=os.environ.get("WECHAT_VOICE_MODEL", "small")
         )
         self.phase_value = tk.StringVar(value="正在检测微信环境……")
+        self.model_progress_value = tk.StringVar()
 
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self._close)
@@ -170,17 +181,32 @@ class ExporterWindow:
         ttk.Label(status, text="当前状态：").pack(side="left")
         ttk.Label(status, textvariable=self.phase_value, foreground="#1261a0").pack(side="left")
 
-        log_frame = ttk.Frame(outer)
-        log_frame.pack(fill="both", expand=True)
+        self.model_progress_frame = ttk.Frame(outer)
+        ttk.Label(
+            self.model_progress_frame,
+            textvariable=self.model_progress_value,
+            foreground="#444444",
+        ).pack(anchor="w", pady=(0, 4))
+        self.model_progress_bar = ttk.Progressbar(
+            self.model_progress_frame,
+            mode="determinate",
+            maximum=100,
+        )
+        self.model_progress_bar.pack(fill="x")
+
+        self.log_frame = ttk.Frame(outer)
+        self.log_frame.pack(fill="both", expand=True)
         self.log = tk.Text(
-            log_frame,
+            self.log_frame,
             height=17,
             state="disabled",
             wrap="word",
             font=("Consolas", 10),
             background="#fafafa",
         )
-        scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log.yview)
+        scrollbar = ttk.Scrollbar(
+            self.log_frame, orient="vertical", command=self.log.yview
+        )
         self.log.configure(yscrollcommand=scrollbar.set)
         self.log.tag_configure("success", foreground="#16713b")
         self.log.tag_configure("error", foreground="#b42318")
@@ -188,6 +214,70 @@ class ExporterWindow:
         self.log.tag_configure("muted", foreground="#666666")
         self.log.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+        self.model_progress_frame.pack_forget()
+
+    def _show_model_progress(self) -> None:
+        if not self.model_progress_frame.winfo_manager():
+            self.model_progress_frame.pack(
+                fill="x", pady=(0, 8), before=self.log_frame
+            )
+
+    def _hide_model_progress(self) -> None:
+        self.model_progress_bar.stop()
+        self.model_progress_frame.pack_forget()
+
+    def _update_model_progress(self, progress: ModelLoadProgress) -> None:
+        self._show_model_progress()
+        model_name = progress.model_name
+        if progress.stage == "checking":
+            self.model_progress_bar.stop()
+            self.model_progress_bar.configure(mode="indeterminate", maximum=100)
+            self.model_progress_bar.start(12)
+            self.model_progress_value.set(f"{model_name} · 正在检查本地模型缓存…")
+            self.phase_value.set("正在检查语音识别模型…")
+            return
+        if progress.stage == "downloading":
+            if progress.total > 0:
+                completed = min(progress.completed, progress.total)
+                percent = completed * 100.0 / progress.total
+                self.model_progress_bar.stop()
+                self.model_progress_bar.configure(
+                    mode="determinate",
+                    maximum=progress.total,
+                    value=completed,
+                )
+                self.model_progress_value.set(
+                    f"{model_name} · {_format_bytes(completed)} / "
+                    f"{_format_bytes(progress.total)} · {percent:.1f}%"
+                )
+                self.phase_value.set(f"正在下载语音模型 {model_name}…")
+            else:
+                self.model_progress_bar.stop()
+                self.model_progress_bar.configure(mode="indeterminate", maximum=100)
+                self.model_progress_bar.start(12)
+                self.model_progress_value.set(f"{model_name} · 正在连接下载源…")
+                self.phase_value.set(f"正在准备下载语音模型 {model_name}…")
+            return
+        if progress.stage == "loading":
+            self.model_progress_bar.stop()
+            self.model_progress_bar.configure(mode="indeterminate", maximum=100)
+            self.model_progress_bar.start(12)
+            self.model_progress_value.set(f"{model_name} · 下载完成，正在加载模型…")
+            self.phase_value.set(f"正在加载语音模型 {model_name}…")
+            return
+        if progress.stage == "ready":
+            self.model_progress_bar.stop()
+            self.model_progress_bar.configure(
+                mode="determinate", maximum=100, value=100
+            )
+            self.model_progress_value.set(f"{model_name} · 模型已加载")
+            self.phase_value.set("语音模型已加载，正在转写…")
+            self.root.after(1200, self._hide_model_progress)
+            return
+        if progress.stage == "error":
+            self.model_progress_bar.stop()
+            self.model_progress_value.set(f"{model_name} · 模型下载或加载失败")
+            self.phase_value.set("语音模型加载失败，继续导出其他消息…")
 
     def _append_log(self, message: str) -> None:
         text = message.rstrip()
@@ -330,6 +420,9 @@ class ExporterWindow:
                         output,
                         transcribe_voice=transcribe_voice,
                         voice_model=voice_model,
+                        voice_progress=lambda progress: self.events.put(
+                            ("model_progress", progress)
+                        ),
                         cancel_event=self.cancel_event,
                     )
                 prefix = "导出已停止" if result.cancelled else "导出完成"
@@ -362,8 +455,11 @@ class ExporterWindow:
                             self.hook_prompted = True
                             self._append_log("当前已登录状态不会重复产生密钥事件。")
                             self._append_log("请保持工具运行，在微信中切换账号并重新登录目标账号。")
+                elif event == "model_progress":
+                    self._update_model_progress(payload)  # type: ignore[arg-type]
                 elif event == "done":
                     success, message, output_dir = payload  # type: ignore[misc]
+                    self._hide_model_progress()
                     self._set_working(False)
                     self.phase_value.set("操作成功" if success else "操作失败")
                     self._append_log(("[成功] " if success else "[错误] ") + message)
