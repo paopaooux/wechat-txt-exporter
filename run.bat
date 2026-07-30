@@ -16,12 +16,13 @@ if errorlevel 1 (
 )
 
 set "PYTHON_EXE="
-for /f "usebackq delims=" %%P in (`py -3.13 -c "import sys; print(sys.executable)" 2^>nul`) do set "PYTHON_EXE=%%P"
+for /f "usebackq delims=" %%P in (`py -3 -c "import sys; assert sys.version_info >= (3, 13); print(sys.executable)" 2^>nul`) do set "PYTHON_EXE=%%P"
+if not defined PYTHON_EXE if exist "%LocalAppData%\Programs\Python\Python314\python.exe" set "PYTHON_EXE=%LocalAppData%\Programs\Python\Python314\python.exe"
 if not defined PYTHON_EXE if exist "%LocalAppData%\Programs\Python\Python313\python.exe" set "PYTHON_EXE=%LocalAppData%\Programs\Python\Python313\python.exe"
 
 if not defined PYTHON_EXE (
-  echo [ERROR] Python 3.13 is not installed.
-  echo Install Python 3.13 from https://www.python.org/downloads/windows/
+  echo [ERROR] Python 3.13 or newer is not installed.
+  echo Install Python 3.13+ from https://www.python.org/downloads/windows/
   pause
   exit /b 1
 )

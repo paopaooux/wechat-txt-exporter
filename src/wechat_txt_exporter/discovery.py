@@ -9,7 +9,8 @@ from pathlib import Path
 from .errors import DiscoveryError, UnsupportedVersionError
 from .models import Account
 
-SUPPORTED_VERSION = "4.1.11.55"
+MIN_SUPPORTED_VERSION = "4.1.11.55"
+SUPPORTED_VERSION_FAMILY = (4, 1)
 ACCOUNT_DIR_RE = re.compile(r"^(?P<wxid>wxid_.+?)(?:_(?P<suffix>[0-9a-fA-F]{4}))?$")
 
 
@@ -30,9 +31,36 @@ def _program_files_candidates() -> list[Path]:
     return candidates
 
 
+def _registry_candidates() -> list[Path]:
+    if os.name != "nt":
+        return []
+    try:
+        import winreg
+    except ImportError:
+        return []
+    candidates: list[Path] = []
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        for key_name in (
+            r"Software\Tencent\Weixin",
+            r"Software\WOW6432Node\Tencent\Weixin",
+        ):
+            try:
+                with winreg.OpenKey(hive, key_name) as key:
+                    install_path, _ = winreg.QueryValueEx(key, "InstallPath")
+            except OSError:
+                continue
+            if install_path:
+                candidates.append(Path(str(install_path)) / "Weixin.exe")
+    return candidates
+
+
 def find_weixin_executable() -> Path:
     override = os.environ.get("WEIXIN_EXE")
-    candidates = ([Path(override)] if override else []) + _program_files_candidates()
+    candidates = (
+        ([Path(override)] if override else [])
+        + _registry_candidates()
+        + _program_files_candidates()
+    )
     for candidate in candidates:
         if candidate.is_file():
             return candidate.resolve()
@@ -59,9 +87,19 @@ def get_file_version(path: Path) -> str:
 
 def verify_supported_version(executable: Path) -> str:
     version = get_file_version(executable)
-    if version != SUPPORTED_VERSION:
+    try:
+        parts = tuple(int(part) for part in version.split("."))
+        minimum = tuple(int(part) for part in MIN_SUPPORTED_VERSION.split("."))
+    except ValueError:
+        parts = ()
+        minimum = ()
+    if (
+        len(parts) != 4
+        or parts[:2] != SUPPORTED_VERSION_FAMILY
+        or parts < minimum
+    ):
         raise UnsupportedVersionError(
-            f"当前微信版本为 {version}，首版仅支持 {SUPPORTED_VERSION}。"
+            f"当前微信版本为 {version}；支持 {MIN_SUPPORTED_VERSION} 及更高的 4.1.x 版本。"
         )
     return version
 

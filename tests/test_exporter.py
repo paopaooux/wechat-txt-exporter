@@ -178,6 +178,83 @@ def test_filters_system_messages_and_labels_self_from_is_send(tmp_path):
     assert "系统提示" not in text
 
 
+def test_distinguishes_private_sender_when_schema_only_has_is_sender(tmp_path):
+    account = _create_fixture(tmp_path)
+    message_path = account.data_dir / "db_storage" / "message" / "message_0.db"
+    connection = sqlite3.connect(message_path)
+    connection.execute("DROP TABLE friend_table")
+    connection.execute(
+        "CREATE TABLE friend_table ("
+        "local_id INTEGER, local_type INTEGER, create_time INTEGER, "
+        "message_content TEXT, is_sender INTEGER)"
+    )
+    connection.executemany(
+        "INSERT INTO friend_table VALUES (?, ?, ?, ?, ?)",
+        [
+            (1, 1, 100, "对方发送", 0),
+            (2, 1, 200, "自己发送", 1),
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+    with Weixin411Adapter(account, b"x" * 32, connection_factory=_factory) as adapter:
+        result = export_all(adapter, tmp_path / "exports")
+    private = next(path for path in result.output_dir.rglob("好友备注*.txt"))
+    text = private.read_text(encoding="utf-8")
+    assert "好友备注：对方发送" in text
+    assert "我：自己发送" in text
+
+
+def test_uses_status_only_when_sender_identity_is_missing(tmp_path):
+    account = _create_fixture(tmp_path)
+    message_path = account.data_dir / "db_storage" / "message" / "message_0.db"
+    connection = sqlite3.connect(message_path)
+    connection.execute("DROP TABLE friend_table")
+    connection.execute(
+        "CREATE TABLE friend_table ("
+        "local_id INTEGER, local_type INTEGER, create_time INTEGER, "
+        "message_content TEXT, status INTEGER)"
+    )
+    connection.executemany(
+        "INSERT INTO friend_table VALUES (?, ?, ?, ?, ?)",
+        [
+            (1, 1, 100, "状态表示对方", 4),
+            (2, 1, 200, "状态表示自己", 2),
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+    with Weixin411Adapter(account, b"x" * 32, connection_factory=_factory) as adapter:
+        result = export_all(adapter, tmp_path / "exports")
+    private = next(path for path in result.output_dir.rglob("好友备注*.txt"))
+    text = private.read_text(encoding="utf-8")
+    assert "好友备注：状态表示对方" in text
+    assert "我：状态表示自己" in text
+
+
+def test_group_receive_with_missing_name2id_is_not_labeled_as_self(tmp_path):
+    account = _create_fixture(tmp_path)
+    message_path = account.data_dir / "db_storage" / "message" / "message_0.db"
+    connection = sqlite3.connect(message_path)
+    connection.execute("ALTER TABLE group_table ADD COLUMN status INTEGER")
+    connection.execute(
+        "INSERT INTO group_table "
+        "(local_id, local_type, real_sender_id, create_time, message_content, status) "
+        "VALUES (2, 49, 10, 400, '<msg><appmsg><type>5</type></appmsg></msg>', 4)"
+    )
+    connection.commit()
+    connection.close()
+
+    with Weixin411Adapter(account, b"x" * 32, connection_factory=_factory) as adapter:
+        result = export_all(adapter, tmp_path / "exports")
+    group = next(path for path in result.output_dir.rglob("测试群*.txt"))
+    text = group.read_text(encoding="utf-8")
+    assert "群成员（发送者记录缺失，ID 10）：" in text
+    assert "我：[链接]" not in text
+
+
 def test_resolves_sender_id_from_message_name2id(tmp_path):
     account = _create_fixture(tmp_path)
     message_path = account.data_dir / "db_storage" / "message" / "message_0.db"
