@@ -54,9 +54,11 @@ class ExportResult:
     output_dir: Path
     succeeded: int = 0
     skipped: int = 0
+    unchanged: int = 0
     failed: int = 0
     messages: int = 0
     voices_transcribed: int = 0
+    voices_cached: int = 0
     voices_failed: int = 0
     cancelled: bool = False
     failures: list[tuple[str, str]] = field(default_factory=list)

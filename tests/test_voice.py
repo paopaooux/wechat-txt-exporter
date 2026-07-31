@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 import sys
 from types import SimpleNamespace
 
@@ -25,7 +23,7 @@ def test_decode_silk_uses_pysilk_file_object_api(tmp_path, monkeypatch):
     assert pcm_path.read_bytes() == b"\x00\x00" * 20
 
 
-def test_voice_transcriber_writes_wav_and_returns_text(tmp_path, monkeypatch):
+def test_voice_transcriber_uses_temporary_wav_and_returns_text(tmp_path, monkeypatch):
     def fake_decode(_silk_path, pcm_path, _sample_rate=24000):
         pcm_path.write_bytes(b"\x00\x00" * 240)
 
@@ -36,9 +34,22 @@ def test_voice_transcriber_writes_wav_and_returns_text(tmp_path, monkeypatch):
     transcriber = VoiceTranscriber("small")
     monkeypatch.setattr(transcriber, "_decode_silk", fake_decode)
     monkeypatch.setattr(transcriber, "_load_model", lambda: FakeModel())
-    output = tmp_path / "voice.wav"
-    result = transcriber.process(b"#!SILK_V3", output)
+    result = transcriber.process(b"#!SILK_V3", tmp_path)
 
     assert result.transcript == "你好世界"
-    assert result.wav_path == output
-    assert output.read_bytes().startswith(b"RIFF")
+    assert not list(tmp_path.glob(".wechat_voice_*"))
+
+
+def test_voice_transcriber_can_use_sensevoice_api(tmp_path, monkeypatch):
+    def fake_decode(_silk_path, pcm_path, _sample_rate=24000):
+        pcm_path.write_bytes(b"\x00\x00" * 240)
+
+    transcriber = VoiceTranscriber("FunAudioLLM/SenseVoiceSmall")
+    monkeypatch.setattr(transcriber, "_decode_silk", fake_decode)
+    monkeypatch.setattr(
+        transcriber, "_transcribe_siliconflow", lambda _wav_path: "在线识别结果"
+    )
+    result = transcriber.process(b"#!SILK_V3", tmp_path)
+
+    assert result.transcript == "在线识别结果"
+    assert not list(tmp_path.glob(".wechat_voice_*"))

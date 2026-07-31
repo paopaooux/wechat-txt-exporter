@@ -9,35 +9,48 @@
 - Python `3.13+` x64
 - 管理员权限
 
-项目已经包含运行所需的 `wx_key.dll`，不需要另外下载。
-
 ## 使用方法
 
-1. 安装 Python 3.13。安装时建议勾选 Python Launcher。
+1. 安装 Python 3.13+。安装时建议勾选 Python Launcher。
 2. 双击 `run.bat`，并允许管理员权限。
 3. 首次运行会自动创建 `.venv` 并安装依赖，请保持网络连接。
 4. 在界面中选择微信账号和输出目录。
-5. 推荐让微信先停留在未登录界面，然后点击“仅验证密钥”或“一键导出全部 TXT”。
-6. 日志出现“Hook 已安装”后，在微信中登录目标账号。
+5. 让微信停留在登录界面，然后点击“仅验证密钥”或“一键更新全部 TXT”。
+6. 日志出现“密钥捕获已就绪”后，在微信中登录所选账号。
 7. 日志出现“数据库验证成功”后，等待导出完成。
-
-如果开始前微信已经登录，请在 Hook 安装成功后切换账号并重新登录。仅看到“Hook 已安装”不代表已经获得密钥。
 
 验证密钥成功后，本次工具运行会复用密钥，接着导出时不需要再次登录。
 
 ## 语音转文字
 
-界面默认开启语音转文字，推荐使用 `small` 模型：
+界面默认开启语音转文字，只支持两个模型：
 
-- `tiny`：最快，准确率较低
-- `base`：速度较快
-- `small`：速度和准确率较均衡，推荐
-- `medium`：更慢
-- `large-v3`：最慢，不建议使用普通 CPU
+- `Whisper small（本地）`：本地运行，不上传语音
+- `FunAudioLLM/SenseVoiceSmall`：通过 SiliconFlow API 在线识别
 
-第一次使用某个模型时会自动联网下载。语音数量较多时，识别可能需要数小时；如果只想快速导出文字消息，请取消勾选“转成文字并写入 TXT”。
+本地 Whisper small 第一次使用时会自动联网下载。使用 SenseVoiceSmall 前，在项目根目录
+创建 `auth.json`：
 
-导出过程中点击关闭，工具会在当前语音处理完成后安全停止，已经生成的文件会保留。
+```json
+{
+  "api_key": "替换为你的 SiliconFlow API Key",
+  "api_url": "https://api.siliconflow.cn/v1/audio/transcriptions"
+}
+```
+
+`auth.json` 已加入 `.gitignore`，不要将 API Key 提交到 Git。程序启动时会联网验证该 Key；
+只有验证成功，`SenseVoiceSmall（SiliconFlow API）` 才会出现在模型下拉框中。
+选择 SenseVoiceSmall 后，语音会先在本地由 Silk 转为 WAV，
+再发送给 SiliconFlow。语音数量较多时，识别可能需要较长时间；如果只想快速导出文字消息，请取消勾选“转成文字并写入 TXT”。
+
+> **SiliconFlow 邀请链接**
+>
+> 还没有 SiliconFlow 账号？可以通过[我的邀请链接注册](https://cloud.siliconflow.cn/i/OlpmEgQx)，
+> 获取 API Key 后即可在本工具中使用 SenseVoiceSmall 在线语音识别。
+> 该链接为项目作者的邀请链接。
+
+导出或语音识别过程中关闭窗口会立即退出，不再等待当前模型返回；已经完整生成的
+TXT 会保留。登录密钥捕获阶段关闭时，会先安全移除微信进程断点再退出。
 
 ## 输出目录
 
@@ -47,23 +60,27 @@
 exports/
 └─ 账号/
    ├─ 个人会话/
-   ├─ 群聊/
-   └─ 语音/
+   └─ 群聊/
 ```
 
-每个好友或群聊生成一个 TXT。重复执行“一键导出全部 TXT”时，会重新读取全部聊天记录，
-并以临时文件原子替换同名 TXT，不会生成新的时间戳目录。写入失败时会保留原 TXT。
+每个好友或群聊生成一个 TXT。第一次运行会全量导出；后续执行“一键更新全部 TXT”时，
+会通过 `exports/<wxid>/.export-state.json` 检查所有会话，只重新读取并原子替换发生变化的
+TXT。未变化的会话和已有语音转写会直接复用。需要忽略增量状态时，点击“强制全量重建”。
+写入失败时会保留原 TXT，不会生成新的时间戳目录。
 文件名优先使用备注，其次使用昵称；自己发送的消息显示为“我”。
+Silk、PCM 和 WAV 仅作为转写临时文件使用，识别完成后立即删除，不会导出语音文件。
 
 ## 常见问题
 
-### 提示 Python 3.13 未安装
+### 提示未安装 Python 3.13 或更高版本
 
-安装 Python 3.13 x64 后重新运行 `run.bat`。如果已经安装，请确认 Python Launcher 可用。
+安装 Python 3.13 或更高版本的 x64 版本后重新运行 `run.bat`。如果已经安装，
+请确认 Python Launcher 可用。
 
-### Hook 成功后没有反应
+### 自动获取密钥失败
 
-请在 Hook 成功后登录目标账号。账号已经登录时，需要切换账号并重新登录。
+请确认工具以管理员身份运行，并在日志显示“密钥捕获已就绪”后登录所选账号。如果仍然失败，
+请完全退出微信后重新运行工具，再按提示登录目标账号。
 
 ### 提示微信版本不支持
 
@@ -71,7 +88,7 @@ exports/
 
 ### 语音转写很慢
 
-将模型改为 `small`、`base` 或 `tiny`，或者关闭语音转写。
+使用本地 Whisper small 时可改用 SenseVoiceSmall API，或者关闭语音转写。
 
 ### 部分语音无法转写
 
@@ -84,4 +101,5 @@ exports/
 .\.venv\Scripts\python.exe -m wechat_txt_exporter --account wxid_xxx
 .\.venv\Scripts\python.exe -m wechat_txt_exporter --output D:\Exports
 .\.venv\Scripts\python.exe -m wechat_txt_exporter --voice-transcribe --voice-model small
+.\.venv\Scripts\python.exe -m wechat_txt_exporter --force-full
 ```

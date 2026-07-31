@@ -19,6 +19,23 @@ from .errors import ExporterError
 from .exporter import export_all
 from .key_recovery import recover_database_key
 from .models import Account
+from .voice import (
+    LOCAL_WHISPER_MODEL,
+    SILICONFLOW_MODEL,
+    validate_siliconflow_api_key,
+)
+
+
+LOCAL_WHISPER_LABEL = "Whisper small（本地）"
+SENSEVOICE_LABEL = "SenseVoiceSmall（SiliconFlow API）"
+
+
+def _voice_model_id(value: str) -> str:
+    return SILICONFLOW_MODEL if value == SENSEVOICE_LABEL else LOCAL_WHISPER_MODEL
+
+
+def _voice_model_label(value: str) -> str:
+    return SENSEVOICE_LABEL if value == SILICONFLOW_MODEL else LOCAL_WHISPER_LABEL
 
 
 def _enable_high_dpi() -> None:
@@ -96,7 +113,7 @@ class ExporterWindow:
         self.accounts: dict[str, Account] = {}
         self.verified_keys: dict[str, bytes] = {}
         self.working = False
-        self.hook_prompted = False
+        self.force_close_allowed = False
         self.cancel_event = threading.Event()
         self.close_requested = False
 
@@ -105,13 +122,18 @@ class ExporterWindow:
             value=str(Path(__file__).resolve().parents[2] / "exports")
         )
         self.voice_value = tk.BooleanVar(value=True)
-        self.voice_model_value = tk.StringVar(
-            value=os.environ.get("WECHAT_VOICE_MODEL", "small")
+        configured_voice_model = os.environ.get("WECHAT_VOICE_MODEL", LOCAL_WHISPER_MODEL)
+        self.preferred_voice_model = (
+            configured_voice_model
+            if configured_voice_model in {LOCAL_WHISPER_MODEL, SILICONFLOW_MODEL}
+            else LOCAL_WHISPER_MODEL
         )
+        self.voice_model_value = tk.StringVar(value=LOCAL_WHISPER_LABEL)
         self.phase_value = tk.StringVar(value="正在检测微信环境……")
 
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self._close)
+        self.root.after(10, self._start_voice_api_check)
         self.root.after(50, self._load_environment)
         self.root.after(100, self._drain_events)
 
@@ -151,9 +173,11 @@ class ExporterWindow:
         self.voice_model_box = ttk.Combobox(
             voice_options,
             textvariable=self.voice_model_value,
-            values=("tiny", "base", "small", "medium", "large-v3"),
-            width=11,
-            state="normal",
+            values=(
+                LOCAL_WHISPER_LABEL,
+            ),
+            width=30,
+            state="readonly",
         )
         self.voice_model_box.pack(side="left")
         form.columnconfigure(1, weight=1)
@@ -162,8 +186,16 @@ class ExporterWindow:
         actions.pack(fill="x", pady=(14, 10))
         self.verify_button = ttk.Button(actions, text="仅验证密钥", command=lambda: self._start(False))
         self.verify_button.pack(side="left")
-        self.export_button = ttk.Button(actions, text="一键导出全部 TXT", command=lambda: self._start(True))
+        self.export_button = ttk.Button(
+            actions, text="一键更新全部 TXT", command=lambda: self._start(True)
+        )
         self.export_button.pack(side="left", padx=10)
+        self.rebuild_button = ttk.Button(
+            actions,
+            text="强制全量重建",
+            command=lambda: self._start(True, force_full=True),
+        )
+        self.rebuild_button.pack(side="left")
 
         status = ttk.Frame(outer)
         status.pack(fill="x", pady=(2, 6))
@@ -196,7 +228,7 @@ class ExporterWindow:
             tag = "success"
         elif text.startswith("[错误]") or "失败" in text:
             tag = "error"
-        elif "Hook" in text or "密钥" in text or "数据库验证" in text:
+        elif "密钥" in text or "数据库验证" in text:
             tag = "phase"
         elif text.startswith("数据目录") or text.startswith("发现"):
             tag = "muted"
@@ -205,19 +237,12 @@ class ExporterWindow:
         self.log.see("end")
         self.log.configure(state="disabled")
 
-    @staticmethod
-    def _is_hook_detail(message: str) -> bool:
-        detail_markers = (
-            "正在初始化系统调用",
-            "正在打开目标进程",
-            "目标函数地址",
-            "正在分配远程数据缓冲区",
-            "正在分配远程伪栈",
-            "正在初始化IPC通信",
-            "正在准备安装Hook",
-            "正在安装远程Hook",
-        )
-        return any(marker in message for marker in detail_markers)
+    def _start_voice_api_check(self) -> None:
+        threading.Thread(target=self._check_voice_api, daemon=True).start()
+
+    def _check_voice_api(self) -> None:
+        valid, message = validate_siliconflow_api_key()
+        self.events.put(("voice_api", (valid, message)))
 
     def _load_environment(self) -> None:
         if self.working:
@@ -258,14 +283,15 @@ class ExporterWindow:
         state = "disabled" if value else "normal"
         self.verify_button.configure(state=state)
         self.export_button.configure(state=state)
+        self.rebuild_button.configure(state=state)
         self.refresh_button.configure(state=state)
         self.browse_button.configure(state=state)
         self.account_box.configure(state="disabled" if value else "readonly")
         self.output_entry.configure(state=state)
         self.voice_check.configure(state=state)
-        self.voice_model_box.configure(state="disabled" if value else "normal")
+        self.voice_model_box.configure(state="disabled" if value else "readonly")
 
-    def _start(self, should_export: bool) -> None:
+    def _start(self, should_export: bool, *, force_full: bool = False) -> None:
         account = self.accounts.get(self.account_value.get())
         if account is None:
             self.phase_value.set("请先选择目标账号")
@@ -273,16 +299,19 @@ class ExporterWindow:
             return
         output = Path(self.output_value.get()).expanduser()
         self._set_working(True)
+        self.force_close_allowed = False
         self.cancel_event.clear()
         self.close_requested = False
-        self.hook_prompted = False
-        self.phase_value.set("正在安装 Hook，等待捕获密钥……")
+        voice_model_label = self.voice_model_value.get()
+        voice_model = _voice_model_id(voice_model_label)
+        self.phase_value.set("正在准备登录密钥捕获……")
         self._append_log("—" * 58)
         self._append_log(f"目标账号：{account.wxid}")
-        self._append_log("微信应保持运行并停留在未登录界面；看到 Hook 成功后再登录。")
-        self._append_log("如果当前已经登录，请等 Hook 成功后切换账号并重新登录。")
+        self._append_log("请先让微信停留在登录界面；看到“密钥捕获已就绪”后登录目标账号。")
         if self.voice_value.get():
-            self._append_log(f"语音转文字已开启，模型：{self.voice_model_value.get()}")
+            self._append_log(f"语音转文字已开启，模型：{voice_model_label}")
+        if force_full:
+            self._append_log("已选择强制全量重建，将忽略会话变化状态。")
         thread = threading.Thread(
             target=self._worker,
             args=(
@@ -290,7 +319,8 @@ class ExporterWindow:
                 output,
                 should_export,
                 self.voice_value.get(),
-                self.voice_model_value.get(),
+                voice_model,
+                force_full,
             ),
             daemon=True,
         )
@@ -303,18 +333,20 @@ class ExporterWindow:
         should_export: bool,
         transcribe_voice: bool,
         voice_model: str,
+        force_full: bool,
     ) -> None:
         writer = _QueueWriter(self.events)
         try:
-            data_root = find_data_root()
             with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
                 cache_key = account.data_dir.name.casefold()
                 key = self.verified_keys.get(cache_key)
                 if key is None:
-                    key = recover_database_key(account, data_root)
-                    print("密钥已捕获，正在验证所选账号数据库……")
+                    key = recover_database_key(account)
+                    self.events.put(("phase", "正在验证所选账号数据库……"))
+                    print("密钥已获取，正在验证所选账号数据库……")
                 else:
-                    print("正在使用本次运行已验证的内存密钥，无需重新登录……")
+                    self.events.put(("phase", "正在验证所选账号数据库……"))
+                    print("正在使用本次运行已验证的内存密钥……")
                 with Weixin411Adapter(account, key) as adapter:
                     adapter.validate_key()
                     self.verified_keys[cache_key] = key
@@ -322,6 +354,8 @@ class ExporterWindow:
                     if not should_export:
                         self.events.put(("done", (True, "密钥和数据库验证成功。", None)))
                         return
+                    self.force_close_allowed = True
+                    self.events.put(("phase", "正在准备导出聊天记录……"))
                     output = output.resolve()
                     output.mkdir(parents=True, exist_ok=True)
                     print("开始导出聊天记录……")
@@ -331,12 +365,16 @@ class ExporterWindow:
                         transcribe_voice=transcribe_voice,
                         voice_model=voice_model,
                         cancel_event=self.cancel_event,
+                        progress=lambda message: self.events.put(("phase", message)),
+                        force_full=force_full,
                     )
                 prefix = "导出已停止" if result.cancelled else "导出完成"
                 summary = (
-                    f"{prefix}：{result.succeeded} 个成功，{result.skipped} 个本地无消息，"
+                    f"{prefix}：{result.succeeded} 个已更新，{result.unchanged} 个未变化，"
+                    f"{result.skipped} 个本地无消息，"
                     f"{result.messages} 条消息，{result.failed} 个真正失败；"
-                    f"语音转写 {result.voices_transcribed} 条，失败 {result.voices_failed} 条。"
+                    f"语音新转写 {result.voices_transcribed} 条，复用 {result.voices_cached} 条，"
+                    f"失败 {result.voices_failed} 条。"
                 )
                 self.events.put(("done", (result.failed == 0, summary, result.output_dir)))
         except Exception as exc:
@@ -350,20 +388,28 @@ class ExporterWindow:
                 event, payload = self.events.get_nowait()
                 if event == "log":
                     message = str(payload)
-                    if self._is_hook_detail(message):
-                        continue
-                    if "开始初始化Hook系统" in message:
-                        self._append_log("正在安装微信密钥捕获 Hook……")
-                        continue
                     self._append_log(message)
-                    if "Hook安装成功" in message or "Hook 安装成功" in message:
-                        self.phase_value.set("Hook 已安装：请切换账号并重新登录（最长等待 3 分钟）")
-                        if not self.hook_prompted:
-                            self.hook_prompted = True
-                            self._append_log("当前已登录状态不会重复产生密钥事件。")
-                            self._append_log("请保持工具运行，在微信中切换账号并重新登录目标账号。")
+                    if "密钥捕获已就绪" in message:
+                        self.phase_value.set("捕获已就绪：请登录目标微信账号")
+                elif event == "voice_api":
+                    valid, message = payload  # type: ignore[misc]
+                    values = (
+                        (LOCAL_WHISPER_LABEL, SENSEVOICE_LABEL)
+                        if valid
+                        else (LOCAL_WHISPER_LABEL,)
+                    )
+                    self.voice_model_box["values"] = values
+                    if valid and self.preferred_voice_model == SILICONFLOW_MODEL:
+                        self.voice_model_value.set(SENSEVOICE_LABEL)
+                    elif self.voice_model_value.get() not in values:
+                        self.voice_model_value.set(LOCAL_WHISPER_LABEL)
+                    prefix = "[成功] " if valid else "[提示] "
+                    self._append_log(prefix + str(message))
+                elif event == "phase":
+                    self.phase_value.set(str(payload))
                 elif event == "done":
                     success, message, output_dir = payload  # type: ignore[misc]
+                    self.force_close_allowed = False
                     self._set_working(False)
                     self.phase_value.set("操作成功" if success else "操作失败")
                     self._append_log(("[成功] " if success else "[错误] ") + message)
@@ -377,11 +423,14 @@ class ExporterWindow:
 
     def _close(self) -> None:
         if self.working:
-            if not self.cancel_event.is_set():
+            self.cancel_event.set()
+            if self.force_close_allowed:
+                self.root.destroy()
+                return
+            if not self.close_requested:
                 self.close_requested = True
-                self.cancel_event.set()
                 self.phase_value.set("正在停止操作并安全清理资源……")
-                self._append_log("已请求停止；当前这条语音处理结束后将安全退出，请稍候。")
+                self._append_log("正在安全移除微信进程断点，完成后将自动退出……")
             return
         self.root.destroy()
 

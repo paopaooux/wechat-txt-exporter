@@ -3,9 +3,11 @@ import hashlib
 import threading
 from pathlib import Path
 
+import wechat_txt_exporter.exporter as exporter_module
 from wechat_txt_exporter.adapter import Weixin411Adapter
 from wechat_txt_exporter.exporter import _unique_filename, export_all, safe_filename
 from wechat_txt_exporter.models import Account
+from wechat_txt_exporter.voice import VoiceResult
 
 
 def _create_fixture(root: Path) -> Account:
@@ -108,12 +110,122 @@ def test_repeated_export_rewrites_the_same_txt_atomically(tmp_path):
     target.write_text("不应保留的旧内容", encoding="utf-8")
 
     with Weixin411Adapter(account, b"x" * 32, connection_factory=_factory) as adapter:
-        second = export_all(adapter, output_root)
+        second = export_all(adapter, output_root, force_full=True)
 
     assert first.output_dir == output_root / account.wxid
     assert second.output_dir == first.output_dir
     assert target.read_text(encoding="utf-8") == original
     assert not list(first.output_dir.rglob("*.tmp"))
+
+
+def test_incremental_export_skips_unchanged_conversations(tmp_path, monkeypatch):
+    account = _create_fixture(tmp_path)
+    output_root = tmp_path / "exports"
+    with Weixin411Adapter(account, b"x" * 32, connection_factory=_factory) as adapter:
+        first = export_all(adapter, output_root)
+
+    with Weixin411Adapter(account, b"x" * 32, connection_factory=_factory) as adapter:
+        monkeypatch.setattr(
+            adapter,
+            "iter_messages",
+            lambda _conversation: (_ for _ in ()).throw(
+                AssertionError("unchanged conversation was read")
+            ),
+        )
+        second = export_all(adapter, output_root)
+
+    assert first.succeeded == 2
+    assert second.succeeded == 0
+    assert second.unchanged == 2
+    assert second.messages == 3
+
+
+def test_incremental_export_rewrites_only_changed_conversation(tmp_path):
+    account = _create_fixture(tmp_path)
+    output_root = tmp_path / "exports"
+    with Weixin411Adapter(account, b"x" * 32, connection_factory=_factory) as adapter:
+        export_all(adapter, output_root)
+
+    message_path = account.data_dir / "db_storage" / "message" / "message_0.db"
+    connection = sqlite3.connect(message_path)
+    connection.execute(
+        "INSERT INTO friend_table "
+        "(local_id, server_id, local_type, sort_seq, real_sender_id, create_time, "
+        "origin_source, message_content, compress_content, packed_info_data) "
+        "VALUES (3, 3, 1, 30, 1, 400, '', '新增消息', '', '')"
+    )
+    connection.commit()
+    connection.close()
+
+    with Weixin411Adapter(account, b"x" * 32, connection_factory=_factory) as adapter:
+        result = export_all(adapter, output_root)
+
+    assert result.succeeded == 1
+    assert result.unchanged == 1
+    assert result.messages == 4
+    target = result.output_dir / "个人会话" / "好友备注.txt"
+    assert "新增消息" in target.read_text(encoding="utf-8")
+
+
+def test_incremental_export_reuses_voice_transcript_cache(tmp_path, monkeypatch):
+    account = _create_fixture(tmp_path)
+    message_path = account.data_dir / "db_storage" / "message" / "message_0.db"
+    connection = sqlite3.connect(message_path)
+    connection.execute(
+        "INSERT INTO friend_table "
+        "(local_id, server_id, local_type, real_sender_id, create_time, message_content) "
+        "VALUES (9, 9988, 34, 1, 500, '')"
+    )
+    connection.commit()
+    connection.close()
+
+    media_path = account.data_dir / "db_storage" / "message" / "media_0.db"
+    connection = sqlite3.connect(media_path)
+    connection.execute("CREATE TABLE Name2Id (user_name TEXT)")
+    connection.execute("INSERT INTO Name2Id(rowid, user_name) VALUES (1, 'wxid_friend')")
+    connection.execute(
+        "CREATE TABLE VoiceInfo "
+        "(chat_name_id INTEGER, create_time INTEGER, msg_svr_id INTEGER, voice_data BLOB)"
+    )
+    connection.execute(
+        "INSERT INTO VoiceInfo VALUES (1, 500, 9988, ?)",
+        (b"#!SILK_V3 cached",),
+    )
+    connection.commit()
+    connection.close()
+
+    class FakeTranscriber:
+        calls = 0
+
+        def __init__(self, _model):
+            pass
+
+        def process(self, _silk, _work_dir, cancel_event=None):
+            assert cancel_event is None
+            type(self).calls += 1
+            return VoiceResult(transcript="缓存语音")
+
+    monkeypatch.setattr(exporter_module, "VoiceTranscriber", FakeTranscriber)
+    output_root = tmp_path / "exports"
+    with Weixin411Adapter(account, b"x" * 32, connection_factory=_factory) as adapter:
+        first = export_all(adapter, output_root, transcribe_voice=True)
+
+    connection = sqlite3.connect(message_path)
+    connection.execute(
+        "INSERT INTO friend_table "
+        "(local_id, server_id, local_type, real_sender_id, create_time, message_content) "
+        "VALUES (10, 9999, 1, 1, 600, '触发会话更新')"
+    )
+    connection.commit()
+    connection.close()
+
+    with Weixin411Adapter(account, b"x" * 32, connection_factory=_factory) as adapter:
+        second = export_all(adapter, output_root, transcribe_voice=True)
+
+    assert first.voices_transcribed == 1
+    assert second.voices_transcribed == 0
+    assert second.voices_cached == 1
+    assert FakeTranscriber.calls == 1
 
 
 def test_export_can_be_cancelled_before_next_conversation(tmp_path):

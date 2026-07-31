@@ -445,7 +445,7 @@ class Weixin411Adapter:
         return result
 
     def voice_blob(self, conversation: Conversation, message: Message) -> bytes | None:
-        """Locate a type-34 Silk blob in media_N.db using WeFlow's fallback order."""
+        """Locate a type-34 Silk blob in media_N.db using the compatible fallback order."""
         if (message.message_type & 0xFFFF) != 34:
             return None
         server_id = _as_int(_first(message.raw, ("server_id", "serverid", "msg_svr_id")), 0)
@@ -590,6 +590,42 @@ class Weixin411Adapter:
                 )
         messages.sort()
         yield from messages
+
+    def conversation_fingerprint(self, conversation: Conversation) -> str:
+        """Return a cheap fingerprint that changes when local message rows change."""
+        values: list[tuple[object, ...]] = []
+        for path, connection, table in self._locate_message_tables(conversation):
+            columns = next(
+                columns
+                for name, columns in tables_with_columns(connection)
+                if name == table
+            )
+            talker_column = _column(
+                columns, ("talker", "str_talker", "username", "chat_name")
+            )
+            aggregate_columns = [
+                _column(columns, names)
+                for names in (
+                    ("local_id", "localid"),
+                    ("create_time", "createtime", "timestamp"),
+                    ("server_id", "server_seq", "msg_svr_id"),
+                )
+            ]
+            aggregates = ["COUNT(*)", "COALESCE(MAX(rowid), 0)"]
+            aggregates.extend(
+                f"COALESCE(MAX({quote_identifier(column)}), 0)"
+                for column in aggregate_columns
+                if column
+            )
+            sql = f"SELECT {', '.join(aggregates)} FROM {quote_identifier(table)}"
+            parameters: tuple[object, ...] = ()
+            if talker_column:
+                sql += f" WHERE {quote_identifier(talker_column)} = ?"
+                parameters = (conversation.username,)
+            row = connection.execute(sql, parameters).fetchone()
+            values.append((path.name, table, *(tuple(row) if row is not None else ())))
+        payload = repr(sorted(values)).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
 
     def _resolve_sender(
         self,

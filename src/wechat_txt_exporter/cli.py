@@ -17,6 +17,7 @@ from .discovery import (
 from .errors import ExporterError
 from .exporter import export_all
 from .key_recovery import recover_database_key
+from .voice import LOCAL_WHISPER_MODEL, SILICONFLOW_MODEL
 
 
 def _project_root() -> Path:
@@ -35,17 +36,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=_project_root() / "exports",
         help="输出根目录（默认：程序目录下的 exports）",
     )
-    parser.add_argument(
-        "--key-file",
-        type=Path,
-        help="自动获取失败时使用的密钥文件；内容为 64 位十六进制密钥",
-    )
     parser.add_argument("--verbose", action="store_true", help="显示结构诊断信息")
     parser.add_argument(
         "--voice-transcribe", action="store_true", help="将 Silk 语音转成文字并写入 TXT"
     )
     parser.add_argument(
-        "--voice-model", default="small", help="faster-whisper 模型（默认：small）"
+        "--voice-model",
+        choices=(LOCAL_WHISPER_MODEL, SILICONFLOW_MODEL),
+        default=LOCAL_WHISPER_MODEL,
+        help="语音模型：本地 Whisper small 或 SiliconFlow SenseVoiceSmall",
+    )
+    parser.add_argument(
+        "--force-full",
+        action="store_true",
+        help="忽略增量状态，强制重建全部 TXT",
     )
     parser.add_argument("--version", action="version", version=__version__)
     return parser
@@ -64,7 +68,7 @@ def run(args: argparse.Namespace) -> int:
     print(f"数据目录：{data_root}")
     print(f"目标账号：{account.wxid}")
     print("正在获取本地数据库密钥……")
-    key = recover_database_key(account, data_root, args.key_file)
+    key = recover_database_key(account)
 
     output_root = args.output.expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
@@ -76,15 +80,20 @@ def run(args: argparse.Namespace) -> int:
             output_root,
             transcribe_voice=args.voice_transcribe,
             voice_model=args.voice_model,
+            force_full=args.force_full,
         )
 
     print()
     print(f"输出目录：{result.output_dir}")
-    print(f"成功会话：{result.succeeded}")
-    print(f"跳过会话：{result.skipped}")
+    print(f"更新会话：{result.succeeded}")
+    print(f"未变化会话：{result.unchanged}")
+    print(f"本地无消息：{result.skipped}")
     print(f"消息总数：{result.messages}")
     if args.voice_transcribe:
-        print(f"语音转写：{result.voices_transcribed} 成功，{result.voices_failed} 失败")
+        print(
+            f"语音转写：{result.voices_transcribed} 条新增，"
+            f"{result.voices_cached} 条复用，{result.voices_failed} 条失败"
+        )
     print(f"失败会话：{result.failed}")
     if result.failures:
         print("失败详情：")
