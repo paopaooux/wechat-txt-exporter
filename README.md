@@ -15,20 +15,22 @@
 2. 双击 `run.bat`，并允许管理员权限。
 3. 首次运行会自动创建 `.venv` 并安装依赖，请保持网络连接。
 4. 在界面中选择微信账号和输出目录。
-5. 让微信停留在登录界面，然后点击“仅验证密钥”或“一键更新全部 TXT”。
+5. 让微信停留在登录界面，然后点击“验证数据库访问”或“一键更新全部 TXT”。
 6. 日志出现“密钥捕获已就绪”后，在微信中登录所选账号。
 7. 日志出现“数据库验证成功”后，等待导出完成。
 
-验证密钥成功后，本次工具运行会复用密钥，接着导出时不需要再次登录。
+数据库访问验证成功后，本次工具运行会复用密钥，接着导出时不需要再次登录。
 
 ## 语音转文字
 
-界面默认开启语音转文字，只支持两个模型：
+界面默认开启语音转文字，只支持三个模型：
 
 - `Whisper small（本地）`：本地运行，不上传语音
+- `Whisper large-v3（本地）`：本地运行，准确率更高，但占用更多内存且明显更慢
 - `FunAudioLLM/SenseVoiceSmall`：通过 SiliconFlow API 在线识别
 
-本地 Whisper small 第一次使用时会自动联网下载。使用 SenseVoiceSmall 前，在项目根目录
+本地 Whisper 模型第一次使用时会自动联网下载，其中 large-v3 的下载体积和内存占用
+都远高于 small；没有 NVIDIA CUDA 时会使用 CPU，处理速度可能很慢。使用 SenseVoiceSmall 前，在项目根目录
 创建 `auth.json`：
 
 ```json
@@ -41,7 +43,17 @@
 `auth.json` 已加入 `.gitignore`，不要将 API Key 提交到 Git。程序启动时会联网验证该 Key；
 只有验证成功，`SenseVoiceSmall（SiliconFlow API）` 才会出现在模型下拉框中。
 选择 SenseVoiceSmall 后，语音会先在本地由 Silk 转为 WAV，
-再发送给 SiliconFlow。语音数量较多时，识别可能需要较长时间；如果只想快速导出文字消息，请取消勾选“转成文字并写入 TXT”。
+再发送给 SiliconFlow，并默认同时处理 3 条语音。语音数量较多时，识别可能需要较长时间；如果只想快速导出文字消息，请取消勾选“转成文字并写入 TXT”。
+界面会显示当前会话的语音序号、总数、缓存复用状态和单条识别等待秒数，
+长时间没有返回时也可以确认程序仍在等待模型响应。
+
+语音性能可通过环境变量调整：`WECHAT_VOICE_DEVICE=auto|cpu|cuda`、
+`WECHAT_VOICE_COMPUTE_TYPE=int8|float16`、`WECHAT_VOICE_CPU_THREADS=线程数`、
+`WECHAT_VOICE_API_WORKERS=1..8`。默认会自动使用可用的 NVIDIA CUDA，API 并发数为 3；
+如果 SiliconFlow 返回限流错误，可以将并发数降为 1 或 2。
+Whisper 会先使用本地缓存，缺少模型时优先使用国内 Hugging Face 镜像，官方地址作为备用。
+也可以通过 `WECHAT_WHISPER_HF_ENDPOINT` 指定自己的 Hugging Face 下载地址。
+下载使用可断点续传的普通 HTTP 模式；重试时会复用已经下载的模型分片。
 
 > **SiliconFlow 邀请链接**
 >
@@ -88,7 +100,7 @@ Silk、PCM 和 WAV 仅作为转写临时文件使用，识别完成后立即删�
 
 ### 语音转写很慢
 
-使用本地 Whisper small 时可改用 SenseVoiceSmall API，或者关闭语音转写。
+使用本地 Whisper large-v3 时可改用 small 或 SenseVoiceSmall API，也可以关闭语音转写。
 
 ### 部分语音无法转写
 
@@ -101,5 +113,6 @@ Silk、PCM 和 WAV 仅作为转写临时文件使用，识别完成后立即删�
 .\.venv\Scripts\python.exe -m wechat_txt_exporter --account wxid_xxx
 .\.venv\Scripts\python.exe -m wechat_txt_exporter --output D:\Exports
 .\.venv\Scripts\python.exe -m wechat_txt_exporter --voice-transcribe --voice-model small
+.\.venv\Scripts\python.exe -m wechat_txt_exporter --voice-transcribe --voice-model large-v3
 .\.venv\Scripts\python.exe -m wechat_txt_exporter --force-full
 ```

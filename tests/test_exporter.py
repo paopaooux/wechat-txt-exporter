@@ -6,8 +6,8 @@ from pathlib import Path
 import wechat_txt_exporter.exporter as exporter_module
 from wechat_txt_exporter.adapter import Weixin411Adapter
 from wechat_txt_exporter.exporter import _unique_filename, export_all, safe_filename
-from wechat_txt_exporter.models import Account
-from wechat_txt_exporter.voice import VoiceResult
+from wechat_txt_exporter.models import Account, Conversation, Message
+from wechat_txt_exporter.voice import SILICONFLOW_MODEL, VoiceResult
 
 
 def _create_fixture(root: Path) -> Account:
@@ -200,6 +200,9 @@ def test_incremental_export_reuses_voice_transcript_cache(tmp_path, monkeypatch)
         def __init__(self, _model):
             pass
 
+        def prepare(self):
+            pass
+
         def process(self, _silk, _work_dir, cancel_event=None):
             assert cancel_event is None
             type(self).calls += 1
@@ -207,8 +210,15 @@ def test_incremental_export_reuses_voice_transcript_cache(tmp_path, monkeypatch)
 
     monkeypatch.setattr(exporter_module, "VoiceTranscriber", FakeTranscriber)
     output_root = tmp_path / "exports"
+    voice_progress = []
     with Weixin411Adapter(account, b"x" * 32, connection_factory=_factory) as adapter:
-        first = export_all(adapter, output_root, transcribe_voice=True)
+        first = export_all(
+            adapter,
+            output_root,
+            transcribe_voice=True,
+            voice_progress=lambda *values: voice_progress.append(values),
+        )
+    assert [value[2] for value in voice_progress] == ["正在识别", "识别完成"]
 
     connection = sqlite3.connect(message_path)
     connection.execute(
@@ -219,13 +229,81 @@ def test_incremental_export_reuses_voice_transcript_cache(tmp_path, monkeypatch)
     connection.commit()
     connection.close()
 
+    voice_progress.clear()
     with Weixin411Adapter(account, b"x" * 32, connection_factory=_factory) as adapter:
-        second = export_all(adapter, output_root, transcribe_voice=True)
+        second = export_all(
+            adapter,
+            output_root,
+            transcribe_voice=True,
+            voice_progress=lambda *values: voice_progress.append(values),
+        )
 
     assert first.voices_transcribed == 1
     assert second.voices_transcribed == 0
     assert second.voices_cached == 1
     assert FakeTranscriber.calls == 1
+    assert [value[2] for value in voice_progress] == ["已复用缓存"]
+
+
+def test_siliconflow_voice_transcription_runs_concurrently(tmp_path, monkeypatch):
+    class FakeAdapter:
+        def __init__(self):
+            self.account = Account("wxid_test", tmp_path, None)
+            self.conversation = Conversation("friend", "好友", "table")
+            self.messages = [
+                Message(
+                    (value, value, value),
+                    "friend",
+                    value,
+                    value,
+                    34,
+                    "friend",
+                    "好友",
+                    "",
+                    raw={"server_id": value},
+                )
+                for value in range(1, 4)
+            ]
+
+        def load_conversations(self):
+            return [self.conversation]
+
+        def conversation_fingerprint(self, _conversation):
+            return {"count": len(self.messages)}
+
+        def iter_messages(self, _conversation):
+            return iter(self.messages)
+
+        def voice_blob(self, _conversation, message):
+            return f"voice-{message.local_id}".encode()
+
+    class FakeTranscriber:
+        barrier = threading.Barrier(3, timeout=2)
+
+        def __init__(self, model):
+            assert model == SILICONFLOW_MODEL
+
+        @staticmethod
+        def api_workers():
+            return 3
+
+        def process(self, silk_data, _work_dir, _cancel_event=None):
+            self.barrier.wait()
+            return VoiceResult(transcript=silk_data.decode())
+
+    monkeypatch.setattr(exporter_module, "VoiceTranscriber", FakeTranscriber)
+    progress = []
+    result = export_all(
+        FakeAdapter(),
+        tmp_path / "exports",
+        transcribe_voice=True,
+        voice_model=SILICONFLOW_MODEL,
+        voice_progress=lambda *values: progress.append(values),
+    )
+
+    assert result.voices_transcribed == 3
+    assert result.voices_failed == 0
+    assert any("3 路并发" in value[2] for value in progress)
 
 
 def test_export_can_be_cancelled_before_next_conversation(tmp_path):

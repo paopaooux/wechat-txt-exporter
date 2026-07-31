@@ -17,7 +17,7 @@ from .discovery import (
 from .errors import ExporterError
 from .exporter import export_all
 from .key_recovery import recover_database_key
-from .voice import LOCAL_WHISPER_MODEL, SILICONFLOW_MODEL
+from .voice import LOCAL_WHISPER_LARGE_MODEL, LOCAL_WHISPER_MODEL, SILICONFLOW_MODEL
 
 
 def _project_root() -> Path:
@@ -42,9 +42,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--voice-model",
-        choices=(LOCAL_WHISPER_MODEL, SILICONFLOW_MODEL),
+        choices=(LOCAL_WHISPER_MODEL, LOCAL_WHISPER_LARGE_MODEL, SILICONFLOW_MODEL),
         default=LOCAL_WHISPER_MODEL,
-        help="语音模型：本地 Whisper small 或 SiliconFlow SenseVoiceSmall",
+        help="语音模型：本地 Whisper small/large-v3 或 SiliconFlow SenseVoiceSmall",
     )
     parser.add_argument(
         "--force-full",

@@ -5,6 +5,7 @@ import ctypes
 import os
 import queue
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from .exporter import export_all
 from .key_recovery import recover_database_key
 from .models import Account
 from .voice import (
+    LOCAL_WHISPER_LARGE_MODEL,
     LOCAL_WHISPER_MODEL,
     SILICONFLOW_MODEL,
     validate_siliconflow_api_key,
@@ -27,15 +29,24 @@ from .voice import (
 
 
 LOCAL_WHISPER_LABEL = "Whisper small（本地）"
+LOCAL_WHISPER_LARGE_LABEL = "Whisper large-v3（本地）"
 SENSEVOICE_LABEL = "SenseVoiceSmall（SiliconFlow API）"
 
 
 def _voice_model_id(value: str) -> str:
-    return SILICONFLOW_MODEL if value == SENSEVOICE_LABEL else LOCAL_WHISPER_MODEL
+    if value == LOCAL_WHISPER_LARGE_LABEL:
+        return LOCAL_WHISPER_LARGE_MODEL
+    if value == SENSEVOICE_LABEL:
+        return SILICONFLOW_MODEL
+    return LOCAL_WHISPER_MODEL
 
 
 def _voice_model_label(value: str) -> str:
-    return SENSEVOICE_LABEL if value == SILICONFLOW_MODEL else LOCAL_WHISPER_LABEL
+    if value == LOCAL_WHISPER_LARGE_MODEL:
+        return LOCAL_WHISPER_LARGE_LABEL
+    if value == SILICONFLOW_MODEL:
+        return SENSEVOICE_LABEL
+    return LOCAL_WHISPER_LABEL
 
 
 def _enable_high_dpi() -> None:
@@ -125,11 +136,18 @@ class ExporterWindow:
         configured_voice_model = os.environ.get("WECHAT_VOICE_MODEL", LOCAL_WHISPER_MODEL)
         self.preferred_voice_model = (
             configured_voice_model
-            if configured_voice_model in {LOCAL_WHISPER_MODEL, SILICONFLOW_MODEL}
+            if configured_voice_model
+            in {LOCAL_WHISPER_MODEL, LOCAL_WHISPER_LARGE_MODEL, SILICONFLOW_MODEL}
             else LOCAL_WHISPER_MODEL
         )
-        self.voice_model_value = tk.StringVar(value=LOCAL_WHISPER_LABEL)
+        self.voice_model_value = tk.StringVar(
+            value=_voice_model_label(self.preferred_voice_model)
+        )
         self.phase_value = tk.StringVar(value="正在检测微信环境……")
+        self.voice_progress_value = tk.DoubleVar(value=0)
+        self.voice_progress_text = tk.StringVar(value="尚未开始")
+        self.voice_wait_started: float | None = None
+        self.voice_wait_base = ""
 
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self._close)
@@ -175,6 +193,7 @@ class ExporterWindow:
             textvariable=self.voice_model_value,
             values=(
                 LOCAL_WHISPER_LABEL,
+                LOCAL_WHISPER_LARGE_LABEL,
             ),
             width=30,
             state="readonly",
@@ -184,7 +203,11 @@ class ExporterWindow:
 
         actions = ttk.Frame(outer)
         actions.pack(fill="x", pady=(14, 10))
-        self.verify_button = ttk.Button(actions, text="仅验证密钥", command=lambda: self._start(False))
+        self.verify_button = ttk.Button(
+            actions,
+            text="验证数据库访问",
+            command=lambda: self._start(False),
+        )
         self.verify_button.pack(side="left")
         self.export_button = ttk.Button(
             actions, text="一键更新全部 TXT", command=lambda: self._start(True)
@@ -201,6 +224,18 @@ class ExporterWindow:
         status.pack(fill="x", pady=(2, 6))
         ttk.Label(status, text="当前状态：").pack(side="left")
         ttk.Label(status, textvariable=self.phase_value, foreground="#1261a0").pack(side="left")
+
+        voice_status = ttk.Frame(outer)
+        voice_status.pack(fill="x", pady=(0, 8))
+        ttk.Label(voice_status, text="语音进度：").pack(side="left")
+        self.voice_progress_bar = ttk.Progressbar(
+            voice_status,
+            variable=self.voice_progress_value,
+            maximum=100,
+            length=240,
+        )
+        self.voice_progress_bar.pack(side="left", padx=(0, 8))
+        ttk.Label(voice_status, textvariable=self.voice_progress_text).pack(side="left")
 
         log_frame = ttk.Frame(outer)
         log_frame.pack(fill="both", expand=True)
@@ -302,6 +337,10 @@ class ExporterWindow:
         self.force_close_allowed = False
         self.cancel_event.clear()
         self.close_requested = False
+        self.voice_progress_value.set(0)
+        self.voice_progress_text.set("等待语音处理")
+        self.voice_wait_started = None
+        self.voice_wait_base = ""
         voice_model_label = self.voice_model_value.get()
         voice_model = _voice_model_id(voice_model_label)
         self.phase_value.set("正在准备登录密钥捕获……")
@@ -352,7 +391,12 @@ class ExporterWindow:
                     self.verified_keys[cache_key] = key
                     print("数据库验证成功。")
                     if not should_export:
-                        self.events.put(("done", (True, "密钥和数据库验证成功。", None)))
+                        self.events.put(
+                            (
+                                "done",
+                                (True, "数据库访问验证成功，密钥已在本次运行中缓存。", None),
+                            )
+                        )
                         return
                     self.force_close_allowed = True
                     self.events.put(("phase", "正在准备导出聊天记录……"))
@@ -366,6 +410,12 @@ class ExporterWindow:
                         voice_model=voice_model,
                         cancel_event=self.cancel_event,
                         progress=lambda message: self.events.put(("phase", message)),
+                        voice_progress=lambda current, total, status, conversation: self.events.put(
+                            (
+                                "voice_progress",
+                                (current, total, status, conversation),
+                            )
+                        ),
                         force_full=force_full,
                     )
                 prefix = "导出已停止" if result.cancelled else "导出完成"
@@ -394,22 +444,43 @@ class ExporterWindow:
                 elif event == "voice_api":
                     valid, message = payload  # type: ignore[misc]
                     values = (
-                        (LOCAL_WHISPER_LABEL, SENSEVOICE_LABEL)
+                        (
+                            LOCAL_WHISPER_LABEL,
+                            LOCAL_WHISPER_LARGE_LABEL,
+                            SENSEVOICE_LABEL,
+                        )
                         if valid
-                        else (LOCAL_WHISPER_LABEL,)
+                        else (LOCAL_WHISPER_LABEL, LOCAL_WHISPER_LARGE_LABEL)
                     )
                     self.voice_model_box["values"] = values
-                    if valid and self.preferred_voice_model == SILICONFLOW_MODEL:
-                        self.voice_model_value.set(SENSEVOICE_LABEL)
+                    preferred_label = _voice_model_label(self.preferred_voice_model)
+                    if preferred_label in values:
+                        self.voice_model_value.set(preferred_label)
                     elif self.voice_model_value.get() not in values:
                         self.voice_model_value.set(LOCAL_WHISPER_LABEL)
                     prefix = "[成功] " if valid else "[提示] "
                     self._append_log(prefix + str(message))
                 elif event == "phase":
                     self.phase_value.set(str(payload))
+                elif event == "voice_progress":
+                    current, total, status, conversation = payload  # type: ignore[misc]
+                    current = int(current)
+                    total = max(1, int(total))
+                    status = str(status)
+                    conversation = str(conversation)
+                    completed = current - 1 if status.startswith("正在识别") else current
+                    self.voice_progress_value.set(completed * 100 / total)
+                    self.voice_wait_base = (
+                        f"{current}/{total} · {conversation} · {status}"
+                    )
+                    self.voice_progress_text.set(self.voice_wait_base)
+                    self.voice_wait_started = (
+                        time.monotonic() if status.startswith("正在识别") else None
+                    )
                 elif event == "done":
                     success, message, output_dir = payload  # type: ignore[misc]
                     self.force_close_allowed = False
+                    self.voice_wait_started = None
                     self._set_working(False)
                     self.phase_value.set("操作成功" if success else "操作失败")
                     self._append_log(("[成功] " if success else "[错误] ") + message)
@@ -419,6 +490,11 @@ class ExporterWindow:
                         self.root.after_idle(self.root.destroy)
         except queue.Empty:
             pass
+        if self.voice_wait_started is not None:
+            elapsed = max(0, int(time.monotonic() - self.voice_wait_started))
+            self.voice_progress_text.set(
+                f"{self.voice_wait_base} · 已等待 {elapsed} 秒"
+            )
         self.root.after(100, self._drain_events)
 
     def _close(self) -> None:

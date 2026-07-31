@@ -7,6 +7,7 @@ import re
 import tempfile
 import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from .adapter import Weixin411Adapter
 from .content import app_message_type, human_content
 from .media import MediaResolver
 from .models import Conversation, ExportResult, Message
-from .voice import VoiceTranscriber
+from .voice import SILICONFLOW_MODEL, VoiceTranscriber
 
 INVALID_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 WINDOWS_RESERVED = {
@@ -187,6 +188,7 @@ def export_all(
     voice_model: str = "small",
     cancel_event: threading.Event | None = None,
     progress: Callable[[str], None] | None = None,
+    voice_progress: Callable[[int, int, str, str], None] | None = None,
     force_full: bool = False,
 ) -> ExportResult:
     output_dir = output_root / adapter.account.wxid
@@ -204,6 +206,10 @@ def export_all(
         for stale_voice_file in output_dir.glob(".wechat_voice_*"):
             if stale_voice_file.is_file():
                 stale_voice_file.unlink(missing_ok=True)
+        if voice_model != SILICONFLOW_MODEL:
+            if progress is not None:
+                progress(f"正在准备本地语音模型：{voice_model}")
+            voice_transcriber.prepare()
     voice_announced = False
     conversations = adapter.load_conversations()
     total = len(conversations)
@@ -229,6 +235,7 @@ def export_all(
                 "display_name": conversation.display_name,
                 "transcribe_voice": transcribe_voice,
                 "voice_model": voice_model if transcribe_voice else "",
+                "voice_complete": True,
             }
             unchanged = (
                 not force_full
@@ -260,13 +267,16 @@ def export_all(
                 _save_export_state(state_path, state)
                 continue
             if voice_transcriber is not None:
+                voice_retry_needed = False
                 voice_messages = [
                     message for message in messages if (message.message_type & 0xFFFF) == 34
                 ]
                 if voice_messages and not voice_announced:
                     print(f"正在准备语音识别模型：{voice_model}")
                     voice_announced = True
-                for message in voice_messages:
+                voice_total = len(voice_messages)
+                pending_voices: list[tuple[int, Message, bytes, str, str]] = []
+                for voice_index, message in enumerate(voice_messages, start=1):
                     if cancel_event is not None and cancel_event.is_set():
                         result.cancelled = True
                         print("  收到停止请求，当前会话剩余语音不再转写。")
@@ -275,6 +285,13 @@ def export_all(
                     if not silk_data:
                         message.raw["__voice_error"] = "本地 media 数据库中未找到语音"
                         result.voices_failed += 1
+                        if voice_progress is not None:
+                            voice_progress(
+                                voice_index,
+                                voice_total,
+                                "本地语音数据缺失",
+                                conversation.display_name,
+                            )
                         continue
                     cache_key = _voice_cache_key(message)
                     audio_hash = hashlib.sha256(silk_data).hexdigest()
@@ -287,9 +304,28 @@ def export_all(
                     ):
                         message.raw["__voice_transcript"] = cached["transcript"]
                         result.voices_cached += 1
+                        if voice_progress is not None:
+                            voice_progress(
+                                voice_index,
+                                voice_total,
+                                "已复用缓存",
+                                conversation.display_name,
+                            )
+                        continue
+                    if voice_model == SILICONFLOW_MODEL:
+                        pending_voices.append(
+                            (voice_index, message, silk_data, cache_key, audio_hash)
+                        )
                         continue
                     if progress is not None:
                         progress(f"正在转写语音：{conversation.display_name}")
+                    if voice_progress is not None:
+                        voice_progress(
+                            voice_index,
+                            voice_total,
+                            "正在识别",
+                            conversation.display_name,
+                        )
                     voice_result = voice_transcriber.process(
                         silk_data, output_dir, cancel_event=cancel_event
                     )
@@ -305,9 +341,93 @@ def export_all(
                             "transcript": voice_result.transcript,
                         }
                         result.voices_transcribed += 1
+                        if voice_progress is not None:
+                            voice_progress(
+                                voice_index,
+                                voice_total,
+                                "识别完成",
+                                conversation.display_name,
+                            )
                     else:
                         message.raw["__voice_error"] = voice_result.error or "未知错误"
                         result.voices_failed += 1
+                        voice_retry_needed = True
+                        if voice_progress is not None:
+                            voice_progress(
+                                voice_index,
+                                voice_total,
+                                "识别失败",
+                                conversation.display_name,
+                            )
+                if pending_voices and not result.cancelled:
+                    workers = min(voice_transcriber.api_workers(), len(pending_voices))
+                    if progress is not None:
+                        progress(
+                            f"正在并发转写语音（{workers} 路）：{conversation.display_name}"
+                        )
+                    already_completed = voice_total - len(pending_voices)
+                    if voice_progress is not None:
+                        voice_progress(
+                            min(voice_total, already_completed + 1),
+                            voice_total,
+                            f"正在识别（{workers} 路并发）",
+                            conversation.display_name,
+                        )
+                    with ThreadPoolExecutor(
+                        max_workers=workers,
+                        thread_name_prefix="voice-api",
+                    ) as executor:
+                        futures = {
+                            executor.submit(
+                                voice_transcriber.process,
+                                silk_data,
+                                output_dir,
+                                cancel_event,
+                            ): (message, cache_key, audio_hash)
+                            for _, message, silk_data, cache_key, audio_hash in pending_voices
+                        }
+                        completed = already_completed
+                        for future in as_completed(futures):
+                            message, cache_key, audio_hash = futures[future]
+                            completed += 1
+                            if cancel_event is not None and cancel_event.is_set():
+                                result.cancelled = True
+                                for unfinished in futures:
+                                    unfinished.cancel()
+                                print("  收到停止请求，正在立即结束导出。")
+                                break
+                            try:
+                                voice_result = future.result()
+                            except Exception as exc:
+                                message.raw["__voice_error"] = str(exc)
+                                result.voices_failed += 1
+                                voice_retry_needed = True
+                                status = "识别失败"
+                            else:
+                                if voice_result.transcript:
+                                    message.raw["__voice_transcript"] = voice_result.transcript
+                                    voice_cache[cache_key] = {
+                                        "model": voice_model,
+                                        "audio_hash": audio_hash,
+                                        "transcript": voice_result.transcript,
+                                    }
+                                    result.voices_transcribed += 1
+                                    status = "识别完成"
+                                else:
+                                    message.raw["__voice_error"] = (
+                                        voice_result.error or "未知错误"
+                                    )
+                                    result.voices_failed += 1
+                                    voice_retry_needed = True
+                                    status = "识别失败"
+                            if voice_progress is not None:
+                                voice_progress(
+                                    completed,
+                                    voice_total,
+                                    status,
+                                    conversation.display_name,
+                                )
+                metadata["voice_complete"] = not voice_retry_needed
             if result.cancelled:
                 print("导出已停止；当前会话保留原 TXT。")
                 break
