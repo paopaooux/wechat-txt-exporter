@@ -51,6 +51,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="忽略增量状态，强制重建全部 TXT",
     )
+    parser.add_argument(
+        "--since",
+        metavar="YYYY-MM-DD",
+        help="只导出该日期当天 00:00:00 及之后的消息",
+    )
     parser.add_argument("--version", action="version", version=__version__)
     return parser
 
@@ -81,6 +86,7 @@ def run(args: argparse.Namespace) -> int:
             transcribe_voice=args.voice_transcribe,
             voice_model=args.voice_model,
             force_full=args.force_full,
+            since_date=args.since,
         )
 
     print()

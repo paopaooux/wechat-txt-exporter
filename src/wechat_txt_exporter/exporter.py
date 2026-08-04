@@ -31,6 +31,18 @@ EXPORT_FORMAT_VERSION = 1
 EXPORT_STATE_NAME = ".export-state.json"
 
 
+def parse_since_date(value: str | None) -> tuple[str, int] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.strptime(text, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError("起始日期格式应为 YYYY-MM-DD，例如 2026-08-01。") from exc
+    normalized = parsed.strftime("%Y-%m-%d")
+    return normalized, int(parsed.timestamp())
+
+
 def _empty_export_state() -> dict[str, object]:
     return {
         "version": EXPORT_STATE_VERSION,
@@ -190,8 +202,17 @@ def export_all(
     progress: Callable[[str], None] | None = None,
     voice_progress: Callable[[int, int, str, str], None] | None = None,
     force_full: bool = False,
+    since_date: str | None = None,
 ) -> ExportResult:
-    output_dir = output_root / adapter.account.wxid
+    since = parse_since_date(since_date)
+    since_label = since[0] if since is not None else ""
+    since_timestamp = since[1] if since is not None else None
+    export_folder_name = (
+        f"{adapter.account.wxid}（{since_label}起）"
+        if since_label
+        else adapter.account.wxid
+    )
+    output_dir = output_root / export_folder_name
     output_dir.mkdir(parents=True, exist_ok=True)
     result = ExportResult(output_dir=output_dir)
     state_path = output_dir / EXPORT_STATE_NAME
@@ -226,7 +247,13 @@ def export_all(
             )
             category = "群聊" if conversation.is_group else "个人会话"
             target = output_dir / category / filename
-            fingerprint = adapter.conversation_fingerprint(conversation)
+            fingerprint = (
+                adapter.conversation_fingerprint(
+                    conversation, since_timestamp=since_timestamp
+                )
+                if since_timestamp is not None
+                else adapter.conversation_fingerprint(conversation)
+            )
             previous = conversation_states.get(conversation.username)
             metadata = {
                 "fingerprint": fingerprint,
@@ -236,12 +263,19 @@ def export_all(
                 "transcribe_voice": transcribe_voice,
                 "voice_model": voice_model if transcribe_voice else "",
                 "voice_complete": True,
+                "since_date": since_label,
             }
             unchanged = (
                 not force_full
                 and isinstance(previous, dict)
                 and all(previous.get(key) == value for key, value in metadata.items())
-                and target.is_file()
+                and (
+                    target.is_file()
+                    or (
+                        int(previous.get("message_count", -1)) == 0
+                        and not target.exists()
+                    )
+                )
             )
             if unchanged:
                 result.unchanged += 1
@@ -254,7 +288,11 @@ def export_all(
             print(f"[{index}/{total}] 更新：{conversation.display_name}")
             if progress is not None:
                 progress(f"正在更新：{conversation.display_name}")
-            messages = list(adapter.iter_messages(conversation))
+            messages = list(
+                adapter.iter_messages(conversation, since_timestamp=since_timestamp)
+                if since_timestamp is not None
+                else adapter.iter_messages(conversation)
+            )
             if not messages:
                 result.skipped += 1
                 print("  [跳过] 本地没有可导出的消息")

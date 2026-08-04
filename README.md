@@ -79,6 +79,11 @@ exports/
 会通过 `exports/<wxid>/.export-state.json` 检查所有会话，只重新读取并原子替换发生变化的
 TXT。未变化的会话和已有语音转写会直接复用。需要忽略增量状态时，点击“强制全量重建”。
 写入失败时会保留原 TXT，不会生成新的时间戳目录。
+
+“起始日期”通过界面日历选择，例如选择 `2026-08-01` 表示只导出当天
+`00:00:00` 及之后的消息。日期范围会写入账号导出文件夹，例如
+`wxid_xxx（2026-08-01起）/个人会话/好友.txt`。完整导出和不同起始日期分别使用独立文件夹、
+`.export-state.json` 及增量状态；以后使用相同日期更新时，只会原子替换该文件夹内变化的 TXT。
 文件名优先使用备注，其次使用昵称；自己发送的消息显示为“我”。
 Silk、PCM 和 WAV 仅作为转写临时文件使用，识别完成后立即删除，不会导出语音文件。
 
@@ -114,5 +119,6 @@ Silk、PCM 和 WAV 仅作为转写临时文件使用，识别完成后立即删�
 .\.venv\Scripts\python.exe -m wechat_txt_exporter --output D:\Exports
 .\.venv\Scripts\python.exe -m wechat_txt_exporter --voice-transcribe --voice-model small
 .\.venv\Scripts\python.exe -m wechat_txt_exporter --voice-transcribe --voice-model large-v3
+.\.venv\Scripts\python.exe -m wechat_txt_exporter --since 2026-08-01
 .\.venv\Scripts\python.exe -m wechat_txt_exporter --force-full
 ```

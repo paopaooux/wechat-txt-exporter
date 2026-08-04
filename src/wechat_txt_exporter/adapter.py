@@ -501,7 +501,11 @@ class Weixin411Adapter:
                         return rows[0]
         return None
 
-    def iter_messages(self, conversation: Conversation) -> Iterator[Message]:
+    def iter_messages(
+        self,
+        conversation: Conversation,
+        since_timestamp: int | None = None,
+    ) -> Iterator[Message]:
         locations = self._locate_message_tables(conversation)
         if not locations:
             # session.db may retain stale entries after the corresponding local
@@ -520,11 +524,21 @@ class Weixin411Adapter:
                 continue
             talker_column = _column(columns, ("talker", "str_talker", "username", "chat_name"))
             sql = f"SELECT * FROM {quote_identifier(table)}"
-            parameters: tuple[object, ...] = ()
+            conditions: list[str] = []
+            parameters: list[object] = []
             if talker_column:
-                sql += f" WHERE {quote_identifier(talker_column)} = ?"
-                parameters = (conversation.username,)
-            cursor = connection.execute(sql, parameters)
+                conditions.append(f"{quote_identifier(talker_column)} = ?")
+                parameters.append(conversation.username)
+            if since_timestamp is not None:
+                time_identifier = quote_identifier(required["create_time"])
+                conditions.append(
+                    f"(({time_identifier} >= ? AND {time_identifier} < 10000000000) "
+                    f"OR {time_identifier} >= ?)"
+                )
+                parameters.extend((since_timestamp, since_timestamp * 1000))
+            if conditions:
+                sql += " WHERE " + " AND ".join(conditions)
+            cursor = connection.execute(sql, tuple(parameters))
             for row in cursor:
                 data = _row_dict(row, cursor.description)
                 local_id = _as_int(_first(data, ("local_id", "localid")))
@@ -591,7 +605,11 @@ class Weixin411Adapter:
         messages.sort()
         yield from messages
 
-    def conversation_fingerprint(self, conversation: Conversation) -> str:
+    def conversation_fingerprint(
+        self,
+        conversation: Conversation,
+        since_timestamp: int | None = None,
+    ) -> str:
         """Return a cheap fingerprint that changes when local message rows change."""
         values: list[tuple[object, ...]] = []
         for path, connection, table in self._locate_message_tables(conversation):
@@ -618,11 +636,24 @@ class Weixin411Adapter:
                 if column
             )
             sql = f"SELECT {', '.join(aggregates)} FROM {quote_identifier(table)}"
-            parameters: tuple[object, ...] = ()
+            conditions: list[str] = []
+            parameters: list[object] = []
             if talker_column:
-                sql += f" WHERE {quote_identifier(talker_column)} = ?"
-                parameters = (conversation.username,)
-            row = connection.execute(sql, parameters).fetchone()
+                conditions.append(f"{quote_identifier(talker_column)} = ?")
+                parameters.append(conversation.username)
+            time_column = _column(
+                columns, ("create_time", "createtime", "timestamp")
+            )
+            if since_timestamp is not None and time_column:
+                time_identifier = quote_identifier(time_column)
+                conditions.append(
+                    f"(({time_identifier} >= ? AND {time_identifier} < 10000000000) "
+                    f"OR {time_identifier} >= ?)"
+                )
+                parameters.extend((since_timestamp, since_timestamp * 1000))
+            if conditions:
+                sql += " WHERE " + " AND ".join(conditions)
+            row = connection.execute(sql, tuple(parameters)).fetchone()
             values.append((path.name, table, *(tuple(row) if row is not None else ())))
         payload = repr(sorted(values)).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()

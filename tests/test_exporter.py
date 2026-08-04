@@ -1,11 +1,19 @@
 import sqlite3
 import hashlib
 import threading
+from datetime import datetime
 from pathlib import Path
+
+import pytest
 
 import wechat_txt_exporter.exporter as exporter_module
 from wechat_txt_exporter.adapter import Weixin411Adapter
-from wechat_txt_exporter.exporter import _unique_filename, export_all, safe_filename
+from wechat_txt_exporter.exporter import (
+    _unique_filename,
+    export_all,
+    parse_since_date,
+    safe_filename,
+)
 from wechat_txt_exporter.models import Account, Conversation, Message
 from wechat_txt_exporter.voice import SILICONFLOW_MODEL, VoiceResult
 
@@ -165,6 +173,76 @@ def test_incremental_export_rewrites_only_changed_conversation(tmp_path):
     assert result.messages == 4
     target = result.output_dir / "个人会话" / "好友备注.txt"
     assert "新增消息" in target.read_text(encoding="utf-8")
+
+
+def test_date_filtered_export_uses_separate_filename_and_incremental_state(tmp_path):
+    account = _create_fixture(tmp_path)
+    output_root = tmp_path / "exports"
+    with Weixin411Adapter(account, b"x" * 32, connection_factory=_factory) as adapter:
+        full = export_all(adapter, output_root)
+    full_target = full.output_dir / "个人会话" / "好友备注.txt"
+    assert full_target.is_file()
+
+    message_path = account.data_dir / "db_storage" / "message" / "message_0.db"
+    connection = sqlite3.connect(message_path)
+    before = int(datetime(2026, 7, 31, 23, 59, 59).timestamp())
+    boundary = int(datetime(2026, 8, 1, 0, 0, 0).timestamp())
+    connection.executemany(
+        "INSERT INTO friend_table "
+        "(local_id, server_id, local_type, sort_seq, real_sender_id, create_time, "
+        "message_content) VALUES (?, ?, 1, ?, 1, ?, ?)",
+        [
+            (20, 20, 20, before, "日期前消息"),
+            (21, 21, 21, boundary, "日期边界消息"),
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+    with Weixin411Adapter(account, b"x" * 32, connection_factory=_factory) as adapter:
+        first = export_all(adapter, output_root, since_date="2026-08-01")
+    assert first.output_dir.name == "wxid_me（2026-08-01起）"
+    filtered_target = first.output_dir / "个人会话" / "好友备注.txt"
+    text = filtered_target.read_text(encoding="utf-8")
+    assert "日期边界消息" in text
+    assert "日期前消息" not in text
+    assert full_target.is_file()
+
+    connection = sqlite3.connect(message_path)
+    connection.execute(
+        "INSERT INTO friend_table "
+        "(local_id, server_id, local_type, sort_seq, real_sender_id, create_time, "
+        "message_content) VALUES (22, 22, 1, 22, 1, ?, '更早的历史消息')",
+        (before - 100,),
+    )
+    connection.commit()
+    connection.close()
+    with Weixin411Adapter(account, b"x" * 32, connection_factory=_factory) as adapter:
+        second = export_all(adapter, output_root, since_date="2026-08-01")
+    assert second.succeeded == 0
+    assert second.unchanged == 2
+
+    connection = sqlite3.connect(message_path)
+    connection.execute(
+        "INSERT INTO friend_table "
+        "(local_id, server_id, local_type, sort_seq, real_sender_id, create_time, "
+        "message_content) VALUES (23, 23, 1, 23, 1, ?, '日期后新增消息')",
+        (boundary + 100,),
+    )
+    connection.commit()
+    connection.close()
+    with Weixin411Adapter(account, b"x" * 32, connection_factory=_factory) as adapter:
+        third = export_all(adapter, output_root, since_date="2026-08-01")
+    assert third.succeeded == 1
+    assert "日期后新增消息" in filtered_target.read_text(encoding="utf-8")
+    assert not list(first.output_dir.rglob("*.tmp"))
+
+
+def test_parse_since_date_rejects_ambiguous_format():
+    assert parse_since_date("") is None
+    assert parse_since_date("2026-08-01")[0] == "2026-08-01"
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        parse_since_date("8.1")
 
 
 def test_incremental_export_reuses_voice_transcript_cache(tmp_path, monkeypatch):

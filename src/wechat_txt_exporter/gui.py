@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import calendar
 import os
 import queue
 import threading
 import time
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from .adapter import Weixin411Adapter
@@ -17,7 +18,7 @@ from .discovery import (
     verify_supported_version,
 )
 from .errors import ExporterError
-from .exporter import export_all
+from .exporter import export_all, parse_since_date
 from .key_recovery import recover_database_key
 from .models import Account
 from .voice import (
@@ -133,6 +134,7 @@ class ExporterWindow:
             value=str(Path(__file__).resolve().parents[2] / "exports")
         )
         self.voice_value = tk.BooleanVar(value=True)
+        self.since_date_value = tk.StringVar()
         configured_voice_model = os.environ.get("WECHAT_VOICE_MODEL", LOCAL_WHISPER_MODEL)
         self.preferred_voice_model = (
             configured_voice_model
@@ -148,6 +150,7 @@ class ExporterWindow:
         self.voice_progress_text = tk.StringVar(value="尚未开始")
         self.voice_wait_started: float | None = None
         self.voice_wait_base = ""
+        self.date_picker_window = None
 
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self._close)
@@ -180,9 +183,32 @@ class ExporterWindow:
         self.output_entry.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=5)
         self.browse_button = ttk.Button(form, text="浏览…", command=self._browse)
         self.browse_button.grid(row=1, column=2, pady=5)
-        ttk.Label(form, text="语音消息", width=10).grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Label(form, text="起始日期", width=10).grid(row=2, column=0, sticky="w", pady=5)
+        date_options = ttk.Frame(form)
+        date_options.grid(row=2, column=1, columnspan=2, sticky="w", pady=5)
+        self.since_date_entry = ttk.Entry(
+            date_options,
+            textvariable=self.since_date_value,
+            width=14,
+            state="readonly",
+        )
+        self.since_date_entry.pack(side="left")
+        self.date_select_button = ttk.Button(
+            date_options,
+            text="选择日期…",
+            command=self._open_date_picker,
+        )
+        self.date_select_button.pack(side="left", padx=(8, 5))
+        self.date_clear_button = ttk.Button(
+            date_options,
+            text="清除",
+            command=lambda: self.since_date_value.set(""),
+        )
+        self.date_clear_button.pack(side="left")
+        ttk.Label(date_options, text="留空导出全部").pack(side="left", padx=(8, 0))
+        ttk.Label(form, text="语音消息", width=10).grid(row=3, column=0, sticky="w", pady=5)
         voice_options = ttk.Frame(form)
-        voice_options.grid(row=2, column=1, columnspan=2, sticky="w", pady=5)
+        voice_options.grid(row=3, column=1, columnspan=2, sticky="w", pady=5)
         self.voice_check = ttk.Checkbutton(
             voice_options, text="转成文字并写入 TXT", variable=self.voice_value
         )
@@ -313,6 +339,100 @@ class ExporterWindow:
         if selected:
             self.output_value.set(selected)
 
+    def _open_date_picker(self) -> None:
+        if self.date_picker_window is not None:
+            try:
+                self.date_picker_window.lift()
+                self.date_picker_window.focus_force()
+                return
+            except Exception:
+                self.date_picker_window = None
+
+        try:
+            selected = datetime.strptime(
+                self.since_date_value.get(), "%Y-%m-%d"
+            ).date()
+        except ValueError:
+            selected = date.today()
+
+        tk, ttk = self.tk, self.ttk
+        picker = tk.Toplevel(self.root)
+        self.date_picker_window = picker
+        picker.title("选择导出起始日期")
+        picker.resizable(False, False)
+        picker.transient(self.root)
+        picker.geometry(
+            f"+{self.since_date_entry.winfo_rootx()}"
+            f"+{self.since_date_entry.winfo_rooty() + self.since_date_entry.winfo_height()}"
+        )
+        current = [selected.year, selected.month]
+        body = ttk.Frame(picker, padding=10)
+        body.pack(fill="both", expand=True)
+        header = ttk.Frame(body)
+        header.pack(fill="x")
+        title = ttk.Label(header, anchor="center")
+        days = ttk.Frame(body)
+        days.pack(pady=(8, 4))
+
+        def close() -> None:
+            self.date_picker_window = None
+            picker.destroy()
+
+        def choose(day: int) -> None:
+            self.since_date_value.set(
+                f"{current[0]:04d}-{current[1]:02d}-{day:02d}"
+            )
+            close()
+
+        def draw() -> None:
+            title.configure(text=f"{current[0]} 年 {current[1]} 月")
+            for child in days.winfo_children():
+                child.destroy()
+            for column, label in enumerate(("一", "二", "三", "四", "五", "六", "日")):
+                ttk.Label(days, text=label, width=4, anchor="center").grid(
+                    row=0, column=column
+                )
+            for row, week in enumerate(
+                calendar.monthcalendar(current[0], current[1]), start=1
+            ):
+                for column, day in enumerate(week):
+                    if day:
+                        ttk.Button(
+                            days,
+                            text=str(day),
+                            width=3,
+                            command=lambda value=day: choose(value),
+                        ).grid(row=row, column=column, padx=1, pady=1)
+
+        def move_month(offset: int) -> None:
+            month = current[1] + offset
+            current[0] += (month - 1) // 12
+            current[1] = (month - 1) % 12 + 1
+            draw()
+
+        ttk.Button(header, text="‹", width=3, command=lambda: move_month(-1)).grid(
+            row=0, column=0
+        )
+        title.grid(row=0, column=1, sticky="ew", padx=12)
+        ttk.Button(header, text="›", width=3, command=lambda: move_month(1)).grid(
+            row=0, column=2
+        )
+        header.columnconfigure(1, weight=1)
+        footer = ttk.Frame(body)
+        footer.pack(fill="x", pady=(4, 0))
+        ttk.Button(
+            footer,
+            text="今天",
+            command=lambda: (
+                self.since_date_value.set(date.today().strftime("%Y-%m-%d")),
+                close(),
+            ),
+        ).pack(side="left")
+        ttk.Button(footer, text="取消", command=close).pack(side="right")
+        picker.protocol("WM_DELETE_WINDOW", close)
+        draw()
+        picker.grab_set()
+
     def _set_working(self, value: bool) -> None:
         self.working = value
         state = "disabled" if value else "normal"
@@ -323,6 +443,9 @@ class ExporterWindow:
         self.browse_button.configure(state=state)
         self.account_box.configure(state="disabled" if value else "readonly")
         self.output_entry.configure(state=state)
+        self.since_date_entry.configure(state="disabled" if value else "readonly")
+        self.date_select_button.configure(state=state)
+        self.date_clear_button.configure(state=state)
         self.voice_check.configure(state=state)
         self.voice_model_box.configure(state="disabled" if value else "readonly")
 
@@ -333,6 +456,13 @@ class ExporterWindow:
             self._append_log("[错误] 请先选择目标账号。")
             return
         output = Path(self.output_value.get()).expanduser()
+        try:
+            since = parse_since_date(self.since_date_value.get())
+        except ValueError as exc:
+            self.phase_value.set("起始日期格式错误")
+            self._append_log(f"[错误] {exc}")
+            return
+        since_date = since[0] if since is not None else ""
         self._set_working(True)
         self.force_close_allowed = False
         self.cancel_event.clear()
@@ -346,6 +476,9 @@ class ExporterWindow:
         self.phase_value.set("正在准备登录密钥捕获……")
         self._append_log("—" * 58)
         self._append_log(f"目标账号：{account.wxid}")
+        self._append_log(
+            f"导出范围：{since_date} 00:00:00 起" if since_date else "导出范围：全部消息"
+        )
         self._append_log("请先让微信停留在登录界面；看到“密钥捕获已就绪”后登录目标账号。")
         if self.voice_value.get():
             self._append_log(f"语音转文字已开启，模型：{voice_model_label}")
@@ -360,6 +493,7 @@ class ExporterWindow:
                 self.voice_value.get(),
                 voice_model,
                 force_full,
+                since_date,
             ),
             daemon=True,
         )
@@ -373,6 +507,7 @@ class ExporterWindow:
         transcribe_voice: bool,
         voice_model: str,
         force_full: bool,
+        since_date: str,
     ) -> None:
         writer = _QueueWriter(self.events)
         try:
@@ -417,6 +552,7 @@ class ExporterWindow:
                             )
                         ),
                         force_full=force_full,
+                        since_date=since_date,
                     )
                 prefix = "导出已停止" if result.cancelled else "导出完成"
                 summary = (
